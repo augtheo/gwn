@@ -67,7 +67,7 @@ func expandHome(path string) string {
 
 func defaults() *Config {
 	return &Config{
-		ScanPaths:        []string{"~/projects"},
+		ScanPaths:        []string{"~/projects/augtheo", "~/projects/cognitedata"},
 		ScanDepth:        1,
 		Editor:           "nvim",
 		Assistant:        "claude",
