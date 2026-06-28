@@ -76,8 +76,8 @@ On first launch, gwn writes a default config to `~/.config/gwn/config.toml` (res
 
 ```toml
 scan_paths = [
-  "~/projects/augtheo",
-  "~/projects/cognitedata",
+  "~/projects/work",
+  "~/projects/personal",
 ]
 
 scan_depth = 1       # how many levels deep to look for projects
