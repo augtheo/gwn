@@ -39,16 +39,19 @@ func OpenWorkspace(session, dir, editor, assistant string) error {
 	if err := NewSession(session, dir); err != nil {
 		return fmt.Errorf("new-session: %w", err)
 	}
-	if err := RenameWindow(session, 0, "editor"); err != nil {
+	if err := RenameWindow(session, 0, "shell"); err != nil {
 		return err
 	}
-	if err := SendKeys(session, 0, editor); err != nil {
+	if err := NewWindow(session, "editor", dir); err != nil {
+		return err
+	}
+	if err := SendKeys(session, 1, editor); err != nil {
 		return err
 	}
 	if err := NewWindow(session, "ai", dir); err != nil {
 		return err
 	}
-	if err := SendKeys(session, 1, assistant); err != nil {
+	if err := SendKeys(session, 2, assistant); err != nil {
 		return err
 	}
 	if err := SelectWindow(session, 0); err != nil {
