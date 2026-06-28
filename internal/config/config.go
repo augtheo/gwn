@@ -69,7 +69,7 @@ func defaults() *Config {
 	return &Config{
 		ScanPaths:        []string{"~/projects"},
 		ScanDepth:        1,
-		Editor:           "nvim",
+		Editor:           "nvim .",
 		Assistant:        "claude",
 		SessionPrefix:    "",
 		AutoAttachSingle: true,

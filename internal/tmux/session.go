@@ -42,7 +42,7 @@ func OpenWorkspace(session, dir, editor, assistant string) error {
 	if err := RenameWindow(session, 0, "editor"); err != nil {
 		return err
 	}
-	if err := SendKeys(session, 0, editor+" ."); err != nil {
+	if err := SendKeys(session, 0, editor); err != nil {
 		return err
 	}
 	if err := NewWindow(session, "ai", dir); err != nil {
