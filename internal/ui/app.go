@@ -64,7 +64,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q", "esc":
+		case "ctrl+c":
+			m.quitting = true
+			return m, tea.Quit
+		case "esc":
+			if m.input.Value() != "" {
+				m.input.SetValue("")
+				m.refilter()
+				m.cursor = 0
+				return m, nil
+			}
 			m.quitting = true
 			return m, tea.Quit
 		case "enter":
@@ -116,7 +125,7 @@ func (m Model) View() string {
 
 	b.WriteString(styleTitle.Render("  gwn") + "\n")
 
-	inputWidth := m.width - 4
+	inputWidth := m.width - 6
 	if inputWidth < 20 {
 		inputWidth = 20
 	}
