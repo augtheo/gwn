@@ -81,8 +81,8 @@ scan_paths = [
 ]
 
 scan_depth = 1       # how many levels deep to look for projects
-editor    = "nvim"
-assistant = "claude" # or "opencode"
+editor    = "nvim ."                          # full command — no args are appended
+assistant = "claude"                          # or "opencode"
 
 session_prefix    = ""    # prefix for tmux session names, e.g. "w" → "w-myapp"
 auto_attach_single = true # skip TUI and attach directly when only one match
