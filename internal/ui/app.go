@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/augtheo/gwn/internal/config"
@@ -123,7 +122,7 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	b.WriteString(styleTitle.Render("  gwn") + "\n")
+	b.WriteString(styleTitle.Render("gwn") + "\n")
 
 	inputWidth := m.width - 6
 	if inputWidth < 20 {
@@ -145,7 +144,7 @@ func (m Model) View() string {
 	if m.err != nil {
 		b.WriteString(lipgloss.NewStyle().Foreground(colRed).Render("  error: "+m.err.Error()) + "\n")
 	} else {
-		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ↑↓: navigate  q: quit"))
+		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
@@ -158,46 +157,60 @@ func (m Model) renderItem(i int) string {
 
 	if item.wtIdx >= 0 {
 		wt := ws.Worktrees[item.wtIdx]
-		sessionMark := styleSessionNone.Render(iconDot)
+		// Plain text body first, coloured parts appended outside the style render
+		// to avoid ANSI codes inside a Width-constrained Render call.
+		body := "   " + wt.Branch
+		dot := styleSessionNone.Render(" " + iconDot)
 		if wt.HasSession {
-			sessionMark = styleSessionActive.Render(iconDot)
+			dot = styleSessionActive.Render(" " + iconDot)
 		}
-		line := fmt.Sprintf("%s %s %s", iconWorktree, styleBranch.Render(wt.Branch), sessionMark)
 		if selected {
-			return styleWorktreeSelected.Render(line)
+			return styleWorktreeSelected.Render(body) + dot
 		}
-		return styleWorktreeItem.Render(line)
+		return styleWorktreeItem.Render(body) + dot
 	}
 
-	icon := iconDir
-	if ws.Type == scanner.TypeGitRepo {
-		icon = iconGit
-	}
-
-	sessionMark := styleSessionNone.Render(iconDot)
-	if ws.HasSession {
-		sessionMark = styleSessionActive.Render(iconDot)
-	}
-
-	meta := ""
-	if ws.Branch != "" {
-		meta = styleBranch.Render(" " + ws.Branch)
-	}
+	icon := m.icon(ws.Type == scanner.TypeGitRepo)
 
 	expandHint := ""
 	if ws.Type == scanner.TypeGitRepo && len(ws.Worktrees) > 1 {
 		if m.expanded[ws.Path] {
-			expandHint = styleDim.Render(" ▾")
+			expandHint = " ▾"
 		} else {
-			expandHint = styleDim.Render(" ▸")
+			expandHint = " ▸"
 		}
 	}
 
-	line := fmt.Sprintf("%s %s%s%s %s", icon, ws.Name, expandHint, meta, sessionMark)
-	if selected {
-		return styleSelected.Width(m.width - 2).Render(line)
+	// Build plain-text body so Width calculation inside Render is accurate.
+	body := icon + ws.Name + expandHint
+
+	// Coloured parts are appended after Render to stay outside the width budget.
+	branch := ""
+	if ws.Branch != "" {
+		branch = styleBranch.Render(" " + ws.Branch)
 	}
-	return styleNormal.Render(line)
+	dot := styleSessionNone.Render(" " + iconDot)
+	if ws.HasSession {
+		dot = styleSessionActive.Render(" " + iconDot)
+	}
+
+	if selected {
+		return styleSelected.Width(m.width - 2).Render(body) + branch + dot
+	}
+	return styleNormal.Render(body) + branch + dot
+}
+
+func (m Model) icon(isGit bool) string {
+	if !m.cfg.NerdFontIcons {
+		if isGit {
+			return "git "
+		}
+		return "dir "
+	}
+	if isGit {
+		return iconGit + " "
+	}
+	return iconDir + " "
 }
 
 func (m *Model) toggleExpand() {
