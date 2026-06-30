@@ -33,37 +33,48 @@ func sanitize(prefix, s string) string {
 
 func OpenWorkspace(session, dir, editor, assistant string) error {
 	if HasSession(session) {
-		return switchOrAttach(session)
+		if InsideTmux() {
+			return SwitchClient(session)
+		}
+		return AttachSession(session)
 	}
 
 	if err := NewSession(session, dir); err != nil {
 		return fmt.Errorf("new-session: %w", err)
 	}
-	if err := RenameWindow(session, 0, "shell"); err != nil {
+	// Rename by targeting the session (not session:index) — works regardless of base-index.
+	if err := RenameCurrentWindow(session, "shell"); err != nil {
 		return err
 	}
 	if err := NewWindow(session, "editor", dir); err != nil {
 		return err
 	}
-	if err := SendKeys(session, 1, editor); err != nil {
-		return err
-	}
 	if err := NewWindow(session, "ai", dir); err != nil {
 		return err
 	}
-	if err := SendKeys(session, 2, assistant); err != nil {
-		return err
-	}
-	if err := SelectWindow(session, 0); err != nil {
+	if err := SelectWindow(session, "shell"); err != nil {
 		return err
 	}
 
-	return switchOrAttach(session)
-}
-
-func switchOrAttach(session string) error {
 	if InsideTmux() {
-		return SwitchClient(session)
+		// Switch client first so the session inherits the real terminal size,
+		// then start programs — they launch at the correct dimensions.
+		if err := SwitchClient(session); err != nil {
+			return err
+		}
+		if err := SendKeysToWindow(session, "editor", editor); err != nil {
+			return err
+		}
+		return SendKeysToWindow(session, "ai", assistant)
+	}
+
+	// Outside tmux: send keys before attaching (attach blocks; programs will
+	// receive SIGWINCH and redraw once the terminal resizes on attach).
+	if err := SendKeysToWindow(session, "editor", editor); err != nil {
+		return err
+	}
+	if err := SendKeysToWindow(session, "ai", assistant); err != nil {
+		return err
 	}
 	return AttachSession(session)
 }
