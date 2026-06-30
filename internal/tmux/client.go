@@ -3,7 +3,6 @@ package tmux
 import (
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 )
 
@@ -12,30 +11,33 @@ func InsideTmux() bool {
 }
 
 func HasSession(name string) bool {
-	err := exec.Command("tmux", "has-session", "-t", name).Run()
-	return err == nil
+	return exec.Command("tmux", "has-session", "-t", name).Run() == nil
 }
 
 func NewSession(name, dir string) error {
 	return exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir).Run()
 }
 
-func RenameWindow(session string, index int, newName string) error {
-	target := sessionWindow(session, index)
-	return exec.Command("tmux", "rename-window", "-t", target, newName).Run()
+// RenameCurrentWindow renames the current (first) window of a session.
+// Avoids index-based targeting which breaks when base-index != 0.
+func RenameCurrentWindow(session, newName string) error {
+	return exec.Command("tmux", "rename-window", "-t", session, newName).Run()
 }
 
+// NewWindow creates a new named window in the session, appended at the end.
 func NewWindow(session, name, dir string) error {
 	return exec.Command("tmux", "new-window", "-t", session, "-n", name, "-c", dir).Run()
 }
 
-func SendKeys(session string, index int, keys string) error {
-	target := sessionWindow(session, index)
+// SendKeysToWindow sends keys to a window identified by name, not index.
+func SendKeysToWindow(session, window, keys string) error {
+	target := session + ":" + window
 	return exec.Command("tmux", "send-keys", "-t", target, keys, "Enter").Run()
 }
 
-func SelectWindow(session string, index int) error {
-	target := sessionWindow(session, index)
+// SelectWindow selects a window by name.
+func SelectWindow(session, window string) error {
+	target := session + ":" + window
 	return exec.Command("tmux", "select-window", "-t", target).Run()
 }
 
@@ -63,8 +65,4 @@ func ListSessions() ([]string, error) {
 		}
 	}
 	return sessions, nil
-}
-
-func sessionWindow(session string, index int) string {
-	return session + ":" + strconv.Itoa(index)
 }
