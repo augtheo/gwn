@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/augtheo/gwn/internal/config"
 	"github.com/augtheo/gwn/internal/scanner"
@@ -17,6 +19,21 @@ import (
 type errMsg error
 type openedMsg struct{}
 type sessionReadyMsg struct{ attachCmd *exec.Cmd }
+type worktreeCreatedMsg struct {
+	repoPath string
+	err      error
+}
+type repoClonedMsg struct {
+	repoPath      string
+	repoName      string
+	defaultBranch string
+	err           error
+}
+type repoFetchedMsg struct {
+	repoPath string
+	err      error
+}
+type spinnerTickMsg struct{}
 
 type Model struct {
 	cfg      *config.Config
@@ -30,6 +47,14 @@ type Model struct {
 	err      error
 	quitting bool
 	expanded map[string]bool // path → expanded
+
+	creatingWorktree bool
+	createRepoPath   string
+
+	cloningRepo bool
+
+	fetchingPath string
+	spinnerFrame int
 }
 
 type listItem struct {
@@ -64,6 +89,45 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.creatingWorktree {
+			switch msg.String() {
+			case "esc", "ctrl+c":
+				m.cancelCreateWorktree()
+				return m, nil
+			case "enter":
+				branch := strings.TrimSpace(m.input.Value())
+				if branch == "" {
+					return m, nil
+				}
+				repoPath := m.createRepoPath
+				m.cancelCreateWorktree()
+				return m, m.createWorktree(repoPath, branch)
+			default:
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
+		}
+
+		if m.cloningRepo {
+			switch msg.String() {
+			case "esc", "ctrl+c":
+				m.cancelCloneRepo()
+				return m, nil
+			case "enter":
+				src := strings.TrimSpace(m.input.Value())
+				if src == "" {
+					return m, nil
+				}
+				m.cancelCloneRepo()
+				return m, m.cloneRepo(src)
+			default:
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			m.quitting = true
@@ -82,6 +146,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.toggleExpand()
 			return m, nil
+		case "ctrl+w":
+			m.startCreateWorktree()
+			return m, nil
+		case "ctrl+g":
+			m.startCloneRepo()
+			return m, nil
+		case "ctrl+f":
+			return m, m.startFetch()
 		case "up", "ctrl+p", "ctrl+k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -108,6 +180,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg
 		return m, nil
+
+	case worktreeCreatedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.err = nil
+		m.refreshWorkspace(msg.repoPath)
+		return m, nil
+
+	case repoClonedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.err = nil
+		m.refreshWorkspace(msg.repoPath)
+		m.beginWorktreePrompt(msg.repoPath, msg.repoName, msg.defaultBranch)
+		return m, nil
+
+	case repoFetchedMsg:
+		if m.fetchingPath == msg.repoPath {
+			m.fetchingPath = ""
+		}
+		m.err = msg.err
+		return m, nil
+
+	case spinnerTickMsg:
+		if m.fetchingPath == "" {
+			return m, nil
+		}
+		m.spinnerFrame++
+		return m, spinnerTick()
 
 	case openedMsg:
 		m.quitting = true
@@ -155,10 +260,15 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	if m.err != nil {
+	switch {
+	case m.err != nil:
 		b.WriteString(lipgloss.NewStyle().Foreground(colRed).Render("  error: "+m.err.Error()) + "\n")
-	} else {
-		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ↑↓: navigate  esc/ctrl+c: quit"))
+	case m.creatingWorktree:
+		b.WriteString(styleHints.Render("enter: create worktree  esc: cancel"))
+	case m.cloningRepo:
+		b.WriteString(styleHints.Render("enter: clone  esc: cancel"))
+	default:
+		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
@@ -207,9 +317,16 @@ func (m Model) renderItem(i int) string {
 	if ws.HasSession {
 		dot = styleSessionActive.Render(" " + iconDot)
 	}
+	if ws.Path == m.fetchingPath {
+		dot = styleSpinner.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
+	}
 
 	if selected {
-		return styleSelected.Width(m.width - 2).Render(body) + branch + dot
+		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot)
+		if bodyWidth < lipgloss.Width(body) {
+			bodyWidth = lipgloss.Width(body)
+		}
+		return styleSelected.Width(bodyWidth).Render(body) + branch + dot
 	}
 	return styleNormal.Render(body) + branch + dot
 }
@@ -237,6 +354,154 @@ func (m *Model) toggleExpand() {
 	}
 	m.expanded[item.ws.Path] = !m.expanded[item.ws.Path]
 	m.refilter()
+}
+
+func (m *Model) startCreateWorktree() {
+	if m.cursor >= len(m.filtered) {
+		return
+	}
+	item := m.filtered[m.cursor]
+	if item.ws.Type != scanner.TypeGitRepo {
+		return
+	}
+	prefill := m.cfg.BranchPrefixFor(item.ws.Path)
+	if prefill != "" {
+		prefill += "/"
+	}
+	m.beginWorktreePrompt(item.ws.Path, item.ws.Name, prefill)
+}
+
+// beginWorktreePrompt switches the search box into branch-entry mode for
+// repoPath, optionally pre-filling a suggested branch (e.g. a remote's
+// default branch right after cloning).
+func (m *Model) beginWorktreePrompt(repoPath, repoName, prefill string) {
+	m.creatingWorktree = true
+	m.createRepoPath = repoPath
+	m.input.SetValue(prefill)
+	m.input.CursorEnd()
+	m.input.Placeholder = "new worktree branch for " + repoName + "..."
+}
+
+func (m *Model) cancelCreateWorktree() {
+	m.creatingWorktree = false
+	m.createRepoPath = ""
+	m.input.SetValue("")
+	m.input.Placeholder = "search workspaces..."
+}
+
+func (m Model) createWorktree(repoPath, branch string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := scanner.AddWorktree(repoPath, branch)
+		return worktreeCreatedMsg{repoPath: repoPath, err: err}
+	}
+}
+
+func (m *Model) startCloneRepo() {
+	m.cloningRepo = true
+	m.input.SetValue("")
+	m.input.Placeholder = "clone repo (owner/repo or git URL)..."
+}
+
+func (m *Model) cancelCloneRepo() {
+	m.cloningRepo = false
+	m.input.SetValue("")
+	m.input.Placeholder = "search workspaces..."
+}
+
+func (m Model) cloneRepo(src string) tea.Cmd {
+	scanPaths := m.cfg.ScanPaths
+	defaultHost := m.cfg.DefaultGitHost
+	protocol := m.cfg.CloneProtocol
+
+	return func() tea.Msg {
+		if len(scanPaths) == 0 {
+			return repoClonedMsg{err: fmt.Errorf("no scan_paths configured")}
+		}
+		url, name, err := scanner.ResolveCloneSource(src, defaultHost, protocol)
+		if err != nil {
+			return repoClonedMsg{err: err}
+		}
+		repoPath, branch, err := scanner.CloneBare(scanPaths[0], name, url)
+		if err != nil {
+			return repoClonedMsg{err: err}
+		}
+		return repoClonedMsg{repoPath: repoPath, repoName: name, defaultBranch: branch}
+	}
+}
+
+// startFetch runs `git fetch origin` for the selected repo in the background,
+// so new remote branches (bots, teammates, CI) become available to Ctrl+W.
+func (m *Model) startFetch() tea.Cmd {
+	if m.cursor >= len(m.filtered) {
+		return nil
+	}
+	item := m.filtered[m.cursor]
+	if item.ws.Type != scanner.TypeGitRepo {
+		return nil
+	}
+	if m.fetchingPath == item.ws.Path {
+		return nil // already fetching
+	}
+
+	m.fetchingPath = item.ws.Path
+	m.spinnerFrame = 0
+	repoPath := item.ws.Path
+
+	fetch := func() tea.Msg {
+		return repoFetchedMsg{repoPath: repoPath, err: scanner.Fetch(repoPath)}
+	}
+	return tea.Batch(fetch, spinnerTick())
+}
+
+func spinnerTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
+}
+
+// refreshWorkspace re-detects the workspace at path (branch + worktree list)
+// after an external change, preserving known tmux session state, then
+// expands it so the change is immediately visible. If path isn't already
+// known (e.g. a freshly cloned repo), it's appended.
+func (m *Model) refreshWorkspace(path string) {
+	for i := range m.all {
+		if m.all[i].Path != path {
+			continue
+		}
+		old := m.all[i]
+		fresh := scanner.Rescan(path)
+		fresh.HasSession = old.HasSession
+		fresh.TmuxSession = old.TmuxSession
+		for j := range fresh.Worktrees {
+			for _, ow := range old.Worktrees {
+				if ow.Path == fresh.Worktrees[j].Path {
+					fresh.Worktrees[j].HasSession = ow.HasSession
+					fresh.Worktrees[j].TmuxSession = ow.TmuxSession
+					break
+				}
+			}
+		}
+		m.all[i] = fresh
+		m.expanded[path] = true
+		m.refilter()
+		m.selectWorkspace(path)
+		return
+	}
+
+	m.all = append(m.all, scanner.Rescan(path))
+	m.expanded[path] = true
+	m.refilter()
+	m.selectWorkspace(path)
+}
+
+// selectWorkspace moves the cursor to the top-level entry for path, if present.
+func (m *Model) selectWorkspace(path string) {
+	for i, item := range m.filtered {
+		if item.wtIdx == -1 && item.ws.Path == path {
+			m.cursor = i
+			return
+		}
+	}
 }
 
 func (m *Model) refilter() {

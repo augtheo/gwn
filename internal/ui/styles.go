@@ -43,6 +43,9 @@ var (
 	styleSessionNone = lipgloss.NewStyle().
 				Foreground(colOverlay)
 
+	styleSpinner = lipgloss.NewStyle().
+			Foreground(colBlue)
+
 	styleWorktreeItem = lipgloss.NewStyle().
 				Foreground(colSubtext).
 				PaddingLeft(3)
@@ -72,3 +75,5 @@ const (
 	iconWorktree = " "
 	iconDot      = "●"
 )
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}

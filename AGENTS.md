@@ -55,7 +55,9 @@ The flake uses `vendorHash = null` because the `vendor/` directory is committed.
 
 ## Key design decisions
 
-**No network calls at runtime.** All git introspection is done via `git worktree list --porcelain` (shelling out to the system `git`). The `go-git` library is imported but only used for `PlainOpen` to detect if a directory is a git repo.
+**No network calls except explicit user actions.** All git introspection (worktree listing, branch detection) is local, via `git worktree list --porcelain` and `git show-ref`. The `go-git` library is imported but only used for `PlainOpen` to detect if a directory is a git repo. The deliberate exceptions are `Ctrl+G` (`scanner.CloneBare`, shells out to `git clone`/`fetch`/`ls-remote`) and `Ctrl+F` (`scanner.Fetch`, shells out to `git fetch`) — both explicitly triggered by the user, never automatic. In particular, `AddWorktree` never fetches on its own; it only looks at already-fetched `refs/remotes/origin/*`.
+
+**Bare repo + worktree layout.** A workspace directory can optionally be `<repo>/.bare` (a bare git dir) plus one subdirectory per worktree (`<repo>/<branch>`). `scanner.bareGitDir` detects this. Because `scanDir` only reads one level per scan root and skips dotfiles, worktree subdirectories nested this way are never independently rescanned as duplicate top-level entries — this is why the layout exists (see `AddWorktree`/`CloneBare` in `scanner/git.go`). Plain (non-bare) repos still get worktrees created as sibling directories (`<repo>-<branch>`), which *can* show up as duplicate top-level entries since they live at the same scan depth as the original repo.
 
 **Tmux interaction is purely via the CLI.** No tmux socket library. `os/exec` wrapping `tmux` subcommands is sufficient and more stable across tmux versions.
 
