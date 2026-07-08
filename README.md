@@ -15,11 +15,12 @@ A terminal workspace navigator. Scans configured project directories, detects gi
   example-sdk  main ○
   scripts  ○
 
-enter: open  tab: expand worktrees  ↑↓: navigate  q: quit
+ NORMAL  i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f: worktree/clone/fetch  q: quit
 ```
 
 ## Features
 
+- Vim-style modal navigation — starts in Normal mode; press `i` or `/` to search
 - Fuzzy search across all projects in configured paths
 - Git worktree detection — expands inline with `Tab`
 - Create new worktrees on the fly with `Ctrl+W`
@@ -90,6 +91,7 @@ assistant = "claude"                          # or "opencode"
 session_prefix    = ""    # prefix for tmux session names, e.g. "w" → "w-myapp"
 auto_attach_single = true # skip TUI and attach directly when only one match
 nerd_font_icons   = true  # set false if your terminal doesn't have Nerd Fonts
+vim_mode          = true  # start in modal Normal mode; false = classic always-typing search
 default_git_host  = "github.com" # host assumed for "owner/repo" shorthand with Ctrl+G
 clone_protocol    = "https"      # "https" or "ssh" — used to build the clone URL for shorthand forms
 
@@ -125,16 +127,39 @@ The full snippet is in [`docs/tmux.conf`](docs/tmux.conf).
 
 ## Keybindings
 
+gwn starts in vim-style **Normal** mode (single keys act, nothing is typed into
+the search box). Press `i` or `/` to enter **Insert** mode and filter by
+typing; `Esc` returns to Normal mode. Set `vim_mode = false` in the config to
+disable modes entirely and always type directly into the search box, as
+before.
+
+### Normal mode
+
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` or `Ctrl+k` / `Ctrl+j` | Navigate list |
-| `Enter` | Open workspace / switch tmux session |
+| `j` / `↓` or `k` / `↑` | Move down / up (also `Ctrl+j`/`Ctrl+n`, `Ctrl+k`/`Ctrl+p`) |
+| `gg` / `G` | Jump to top / bottom of the list |
+| `Ctrl+D` / `Ctrl+U` | Half-page down / up |
+| A number before a motion, e.g. `5j` or `5G` | Repeat the motion, or jump to that absolute row for `G`/`gg` |
+| `Enter` / `l` | Open workspace / switch tmux session |
+| `h` | Collapse the selected repo's worktrees, or jump to the parent repo from one of its worktrees |
 | `Tab` | Expand or collapse worktrees for a git repo |
+| `i` / `a` | Enter Insert mode (cursor moves to end of the current filter) |
+| `/` | Clear the filter and enter Insert mode |
 | `Ctrl+W` | Create a new worktree for the selected repo (prompts for branch name) |
 | `Ctrl+G` | Clone a remote repo as a new bare repo (prompts for owner/repo or a URL) |
 | `Ctrl+F` | Fetch the selected repo from `origin` (shows a spinner on its row while running) |
-| Type anything | Fuzzy filter |
 | `q` / `Esc` / `Ctrl+C` | Quit |
+
+### Insert mode
+
+| Key | Action |
+|-----|--------|
+| Type anything | Fuzzy filter |
+| `↑` / `↓` or `Ctrl+k`/`Ctrl+j`/`Ctrl+p`/`Ctrl+n` | Navigate list without leaving Insert mode |
+| `Enter` | Open workspace / switch tmux session |
+| `Esc` | Return to Normal mode |
+| `Ctrl+C` | Quit |
 
 ## Creating worktrees
 
