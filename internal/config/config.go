@@ -16,6 +16,7 @@ type Config struct {
 	SessionPrefix    string             `toml:"session_prefix"`
 	AutoAttachSingle bool               `toml:"auto_attach_single"`
 	NerdFontIcons    bool               `toml:"nerd_font_icons"`
+	VimMode          bool               `toml:"vim_mode"`
 	DefaultGitHost   string             `toml:"default_git_host"`
 	CloneProtocol    string             `toml:"clone_protocol"`
 	BranchPrefixes   []BranchPrefixRule `toml:"branch_prefixes"`
@@ -109,6 +110,7 @@ func defaults() *Config {
 		SessionPrefix:    "",
 		AutoAttachSingle: true,
 		NerdFontIcons:    true,
+		VimMode:          true,
 		DefaultGitHost:   "github.com",
 		CloneProtocol:    "https",
 		Appearance:       Appearance{Theme: "mocha"},

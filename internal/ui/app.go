@@ -35,6 +35,13 @@ type repoFetchedMsg struct {
 }
 type spinnerTickMsg struct{}
 
+type mode int
+
+const (
+	modeNormal mode = iota
+	modeInsert
+)
+
 type Model struct {
 	cfg      *config.Config
 	st       *state.State
@@ -47,6 +54,10 @@ type Model struct {
 	err      error
 	quitting bool
 	expanded map[string]bool // path → expanded
+
+	mode         mode
+	pendingG     bool // "g" seen, waiting for a second "g" (gg = go to top)
+	pendingCount int  // numeric prefix accumulated so far, e.g. "5" in "5j"
 
 	creatingWorktree bool
 	createRepoPath   string
@@ -77,6 +88,11 @@ func New(cfg *config.Config, st *state.State, workspaces []scanner.Workspace) Mo
 		all:      workspaces,
 		input:    ti,
 		expanded: make(map[string]bool),
+		mode:     modeInsert,
+	}
+	if cfg.VimMode {
+		m.mode = modeNormal
+		m.input.Blur()
 	}
 	m.refilter()
 	return m
@@ -128,21 +144,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Chords available regardless of mode.
 		switch msg.String() {
 		case "ctrl+c":
 			m.quitting = true
 			return m, tea.Quit
-		case "esc":
-			if m.input.Value() != "" {
-				m.input.SetValue("")
-				m.refilter()
-				m.cursor = 0
-				return m, nil
-			}
-			m.quitting = true
-			return m, tea.Quit
-		case "enter":
-			return m, m.openSelected()
 		case "tab":
 			m.toggleExpand()
 			return m, nil
@@ -154,23 +160,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+f":
 			return m, m.startFetch()
-		case "up", "ctrl+p", "ctrl+k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-			return m, nil
-		case "down", "ctrl+n", "ctrl+j":
-			if m.cursor < len(m.filtered)-1 {
-				m.cursor++
-			}
-			return m, nil
-		default:
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			m.refilter()
-			m.cursor = 0
-			return m, cmd
 		}
+
+		if m.cfg.VimMode && m.mode == modeNormal {
+			return m.updateNormalMode(msg)
+		}
+		return m.updateInsertMode(msg)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -234,6 +229,173 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateInsertMode handles keys while the search box is being typed into —
+// either because vim mode is disabled, or vim mode is on and the user
+// pressed "i", "a", or "/" to start editing.
+func (m Model) updateInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.cfg.VimMode {
+			m.mode = modeNormal
+			m.input.Blur()
+			return m, nil
+		}
+		if m.input.Value() != "" {
+			m.input.SetValue("")
+			m.refilter()
+			m.cursor = 0
+			return m, nil
+		}
+		m.quitting = true
+		return m, tea.Quit
+	case "enter":
+		return m, m.openSelected()
+	case "up", "ctrl+p", "ctrl+k":
+		m.moveCursor(-1)
+		return m, nil
+	case "down", "ctrl+n", "ctrl+j":
+		m.moveCursor(1)
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.refilter()
+		m.cursor = 0
+		return m, cmd
+	}
+}
+
+// updateNormalMode handles keys in vim mode's default, non-editing mode:
+// single keys navigate and act instead of typing into the filter.
+func (m Model) updateNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// Accumulate a numeric prefix, e.g. "5j" moves down 5 items. A leading
+	// "0" isn't special-cased (there's no "start of line" here) so it's
+	// only absorbed once a count has already started.
+	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+		d := int(key[0] - '0')
+		if d != 0 || m.pendingCount > 0 {
+			m.pendingCount = m.pendingCount*10 + d
+			m.pendingG = false
+			return m, nil
+		}
+	}
+
+	hadCount := m.pendingCount > 0
+	count := m.pendingCount
+	if count == 0 {
+		count = 1
+	}
+	m.pendingCount = 0
+
+	if m.pendingG {
+		m.pendingG = false
+		if key == "g" {
+			m.cursor = clampIndex(count-1, len(m.filtered))
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "esc":
+		if m.input.Value() != "" {
+			m.input.SetValue("")
+			m.refilter()
+			m.cursor = 0
+			return m, nil
+		}
+		m.quitting = true
+		return m, tea.Quit
+	case "q":
+		m.quitting = true
+		return m, tea.Quit
+	case "i", "a":
+		m.mode = modeInsert
+		m.input.CursorEnd()
+		return m, m.input.Focus()
+	case "/":
+		m.input.SetValue("")
+		m.refilter()
+		m.cursor = 0
+		m.mode = modeInsert
+		return m, m.input.Focus()
+	case "enter", "l":
+		return m, m.openSelected()
+	case "j", "down", "ctrl+n", "ctrl+j":
+		m.moveCursor(count)
+		return m, nil
+	case "k", "up", "ctrl+p", "ctrl+k":
+		m.moveCursor(-count)
+		return m, nil
+	case "g":
+		m.pendingG = true
+		return m, nil
+	case "G":
+		if hadCount {
+			m.cursor = clampIndex(count-1, len(m.filtered))
+		} else if len(m.filtered) > 0 {
+			m.cursor = len(m.filtered) - 1
+		}
+		return m, nil
+	case "ctrl+d":
+		m.moveCursor(m.halfPage())
+		return m, nil
+	case "ctrl+u":
+		m.moveCursor(-m.halfPage())
+		return m, nil
+	case "h":
+		m.collapseOrJumpToParent()
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) moveCursor(delta int) {
+	if len(m.filtered) == 0 {
+		return
+	}
+	m.cursor += delta
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor > len(m.filtered)-1 {
+		m.cursor = len(m.filtered) - 1
+	}
+}
+
+func clampIndex(i, n int) int {
+	if n == 0 {
+		return 0
+	}
+	if i < 0 {
+		return 0
+	}
+	if i > n-1 {
+		return n - 1
+	}
+	return i
+}
+
+// collapseOrJumpToParent implements vim tree-navigation "h": collapse the
+// selected repo if it's expanded, or jump up to the parent repo if the
+// selection is one of its worktrees.
+func (m *Model) collapseOrJumpToParent() {
+	if m.cursor >= len(m.filtered) {
+		return
+	}
+	item := m.filtered[m.cursor]
+	if item.wtIdx >= 0 {
+		m.cursor = item.parentIdx
+		return
+	}
+	if item.ws.Type == scanner.TypeGitRepo && m.expanded[item.ws.Path] {
+		m.expanded[item.ws.Path] = false
+		m.refilter()
+		m.selectWorkspace(item.ws.Path)
+	}
+}
+
 func (m Model) View() string {
 	if m.quitting {
 		return ""
@@ -247,14 +409,13 @@ func (m Model) View() string {
 	if inputWidth < 20 {
 		inputWidth = 20
 	}
-	b.WriteString(styleInput.Width(inputWidth).Render(m.input.View()) + "\n\n")
-
-	listHeight := m.height - 8
-	if listHeight < 1 {
-		listHeight = 1
+	inputBorder := styleInput
+	if m.cfg.VimMode && m.mode == modeNormal {
+		inputBorder = inputBorder.BorderForeground(colOverlay)
 	}
+	b.WriteString(inputBorder.Width(inputWidth).Render(m.input.View()) + "\n\n")
 
-	start, end := m.visibleRange(listHeight)
+	start, end := m.visibleRange(m.listHeight())
 	for i := start; i < end && i < len(m.filtered); i++ {
 		b.WriteString(m.renderItem(i) + "\n")
 	}
@@ -267,11 +428,36 @@ func (m Model) View() string {
 		b.WriteString(styleHints.Render("enter: create worktree  esc: cancel"))
 	case m.cloningRepo:
 		b.WriteString(styleHints.Render("enter: clone  esc: cancel"))
+	case m.cfg.VimMode && m.mode == modeNormal:
+		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f: worktree/clone/fetch  q: quit"))
+	case m.cfg.VimMode:
+		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
+			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate"))
 	default:
 		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
+}
+
+// listHeight returns the number of item rows that fit in the terminal,
+// matching the layout accounting used by View.
+func (m Model) listHeight() int {
+	h := m.height - 8
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// halfPage returns the vim ctrl+d/ctrl+u scroll distance: half a screen of items.
+func (m Model) halfPage() int {
+	h := m.listHeight() / 2
+	if h < 1 {
+		h = 1
+	}
+	return h
 }
 
 func (m Model) renderItem(i int) string {
@@ -523,11 +709,12 @@ func (m *Model) refilter() {
 	}
 
 	var final []listItem
-	for i, ws := range base {
+	for _, ws := range base {
+		parentIdx := len(final)
 		final = append(final, listItem{ws: ws, wtIdx: -1})
 		if ws.Type == scanner.TypeGitRepo && m.expanded[ws.Path] {
 			for j := range ws.Worktrees {
-				final = append(final, listItem{ws: ws, wtIdx: j, parentIdx: i})
+				final = append(final, listItem{ws: ws, wtIdx: j, parentIdx: parentIdx})
 			}
 		}
 	}
