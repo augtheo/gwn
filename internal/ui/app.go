@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os/exec"
 	"strings"
 
 	"github.com/augtheo/gwn/internal/config"
@@ -15,6 +16,7 @@ import (
 
 type errMsg error
 type openedMsg struct{}
+type sessionReadyMsg struct{ attachCmd *exec.Cmd }
 
 type Model struct {
 	cfg      *config.Config
@@ -110,6 +112,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case openedMsg:
 		m.quitting = true
 		return m, tea.Quit
+
+	case sessionReadyMsg:
+		if msg.attachCmd == nil {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, tea.ExecProcess(msg.attachCmd, func(err error) tea.Msg {
+			if err != nil {
+				return errMsg(err)
+			}
+			return openedMsg{}
+		})
 	}
 
 	return m, nil
@@ -306,11 +320,12 @@ func (m Model) openSelected() tea.Cmd {
 	st := m.st
 
 	return func() tea.Msg {
-		if err := tmux.OpenWorkspace(sessionName, dir, cfg.Editor, cfg.Assistant); err != nil {
+		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.Assistant)
+		if err != nil {
 			return errMsg(err)
 		}
 		st.Touch(dir, sessionName)
 		_ = st.Save()
-		return openedMsg{}
+		return sessionReadyMsg{attachCmd: attachCmd}
 	}
 }

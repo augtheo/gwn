@@ -46,11 +46,18 @@ func SwitchClient(session string) error {
 }
 
 func AttachSession(session string) error {
-	cmd := exec.Command("tmux", "attach-session", "-t", session)
+	cmd := AttachSessionCmd(session)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// AttachSessionCmd builds an attach-session command without wiring stdio, so
+// callers that manage the terminal handoff themselves (e.g. bubbletea's
+// ExecProcess) can run it safely.
+func AttachSessionCmd(session string) *exec.Cmd {
+	return exec.Command("tmux", "attach-session", "-t", session)
 }
 
 func ListSessions() ([]string, error) {
