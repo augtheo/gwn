@@ -3,23 +3,54 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	ScanPaths        []string   `toml:"scan_paths"`
-	ScanDepth        int        `toml:"scan_depth"`
-	Editor           string     `toml:"editor"`
-	Assistant        string     `toml:"assistant"`
-	SessionPrefix    string     `toml:"session_prefix"`
-	AutoAttachSingle bool       `toml:"auto_attach_single"`
-	NerdFontIcons    bool       `toml:"nerd_font_icons"`
-	Appearance       Appearance `toml:"appearance"`
+	ScanPaths        []string           `toml:"scan_paths"`
+	ScanDepth        int                `toml:"scan_depth"`
+	Editor           string             `toml:"editor"`
+	Assistant        string             `toml:"assistant"`
+	SessionPrefix    string             `toml:"session_prefix"`
+	AutoAttachSingle bool               `toml:"auto_attach_single"`
+	NerdFontIcons    bool               `toml:"nerd_font_icons"`
+	DefaultGitHost   string             `toml:"default_git_host"`
+	CloneProtocol    string             `toml:"clone_protocol"`
+	BranchPrefixes   []BranchPrefixRule `toml:"branch_prefixes"`
+	Appearance       Appearance         `toml:"appearance"`
+}
+
+// BranchPrefixRule auto-prefixes new branch names (in the Ctrl+W prompt) for
+// repos under Path, e.g. so work repos get "augtheo/" but personal ones don't.
+type BranchPrefixRule struct {
+	Path   string `toml:"path"`
+	Prefix string `toml:"prefix"`
 }
 
 type Appearance struct {
 	Theme string `toml:"theme"`
+}
+
+// BranchPrefixFor returns the configured branch prefix for repoPath, using
+// the longest matching BranchPrefixes entry, or "" if none match.
+func (c *Config) BranchPrefixFor(repoPath string) string {
+	repoPath = filepath.Clean(repoPath)
+
+	best := ""
+	bestLen := -1
+	for _, rule := range c.BranchPrefixes {
+		root := filepath.Clean(rule.Path)
+		if repoPath != root && !strings.HasPrefix(repoPath, root+string(filepath.Separator)) {
+			continue
+		}
+		if len(root) > bestLen {
+			bestLen = len(root)
+			best = rule.Prefix
+		}
+	}
+	return best
 }
 
 func Load() (*Config, error) {
@@ -45,6 +76,10 @@ func Load() (*Config, error) {
 		expanded = append(expanded, expandHome(p))
 	}
 	cfg.ScanPaths = expanded
+
+	for i := range cfg.BranchPrefixes {
+		cfg.BranchPrefixes[i].Path = expandHome(cfg.BranchPrefixes[i].Path)
+	}
 
 	return cfg, nil
 }
@@ -74,6 +109,8 @@ func defaults() *Config {
 		SessionPrefix:    "",
 		AutoAttachSingle: true,
 		NerdFontIcons:    true,
+		DefaultGitHost:   "github.com",
+		CloneProtocol:    "https",
 		Appearance:       Appearance{Theme: "mocha"},
 	}
 }

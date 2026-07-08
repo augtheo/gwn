@@ -2,8 +2,11 @@ package scanner
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -35,11 +38,216 @@ type WorktreeInfo struct {
 	HasSession  bool
 }
 
+// Rescan re-detects a single workspace at path, refreshing its branch and
+// worktree list after an external change (e.g. a newly created worktree).
+func Rescan(path string) Workspace {
+	return detectWorkspace(path)
+}
+
+var worktreePathUnsafe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+func sanitizePathSegment(s string) string {
+	return strings.Trim(worktreePathUnsafe.ReplaceAllString(s, "-"), "-")
+}
+
+// bareGitDir returns path's ".bare" subdirectory if it holds a bare git repo,
+// used for the <repo>/.bare + <repo>/<branch> worktree layout.
+func bareGitDir(path string) (string, bool) {
+	dir := filepath.Join(path, ".bare")
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--is-bare-repository").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		return "", false
+	}
+	return dir, true
+}
+
+// AddWorktree creates a new git worktree for branch under repoPath. If branch
+// already exists locally, it's checked out as-is. Else if it exists on the
+// "origin" remote (already fetched — this never touches the network), a new
+// local branch is created tracking it. Otherwise a new branch is created off
+// HEAD. If repoPath uses the <repo>/.bare layout, the worktree is nested at
+// <repoPath>/<branch>; otherwise it's a sibling directory named
+// <repo>-<branch>. It returns the new worktree's path.
+func AddWorktree(repoPath, branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", fmt.Errorf("branch name required")
+	}
+
+	gitDir := repoPath
+	var dest string
+	if dir, ok := bareGitDir(repoPath); ok {
+		gitDir = dir
+		dest = filepath.Join(repoPath, sanitizePathSegment(branch))
+	} else {
+		dest = filepath.Join(filepath.Dir(repoPath), filepath.Base(repoPath)+"-"+sanitizePathSegment(branch))
+	}
+
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("%s already exists", dest)
+	}
+
+	var args []string
+	switch {
+	case refExists(gitDir, "refs/heads/"+branch):
+		args = []string{"-C", gitDir, "worktree", "add", dest, branch}
+	case refExists(gitDir, "refs/remotes/origin/"+branch):
+		args = []string{"-C", gitDir, "worktree", "add", "--track", "-b", branch, dest, "origin/" + branch}
+	default:
+		args = []string{"-C", gitDir, "worktree", "add", "-b", branch, dest}
+	}
+
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git worktree add: %s", cleanGitOutput(out, err))
+	}
+	return dest, nil
+}
+
+func refExists(gitDir, ref string) bool {
+	cmd := exec.Command("git", "-C", gitDir, "show-ref", "--verify", "--quiet", ref)
+	return cmd.Run() == nil
+}
+
+// Fetch runs `git fetch origin` for repoPath (its .bare dir if bare-structured,
+// otherwise the repo itself), updating remote-tracking refs so branches
+// pushed elsewhere (CI, dependabot, teammates) become visible to AddWorktree.
+func Fetch(repoPath string) error {
+	gitDir := repoPath
+	if dir, ok := bareGitDir(repoPath); ok {
+		gitDir = dir
+	}
+
+	out, err := exec.Command("git", "-C", gitDir, "fetch", "origin").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git fetch: %s", cleanGitOutput(out, err))
+	}
+	return nil
+}
+
+func cleanGitOutput(out []byte, err error) string {
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		msg = err.Error()
+	}
+	return msg
+}
+
+// ResolveCloneSource turns a user-provided clone target into a git clone URL
+// and a repo name. Accepted forms: "owner/repo" (uses defaultHost),
+// "host/owner/repo", or a full "git@..."/"https://..." URL. protocol controls
+// the URL built for the shorthand forms ("https" or "ssh"); it's ignored for
+// forms that already spell out a full URL.
+func ResolveCloneSource(input, defaultHost, protocol string) (url string, name string, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", fmt.Errorf("repo required")
+	}
+	if defaultHost == "" {
+		defaultHost = "github.com"
+	}
+	if protocol == "" {
+		protocol = "https"
+	}
+
+	if strings.Contains(input, "://") || strings.HasPrefix(input, "git@") {
+		return input, repoNameFromURL(input), nil
+	}
+
+	trimmed := strings.TrimSuffix(strings.TrimSuffix(input, "/"), ".git")
+	parts := strings.Split(trimmed, "/")
+
+	var host, owner, repo string
+	switch len(parts) {
+	case 2:
+		host, owner, repo = defaultHost, parts[0], parts[1]
+	case 3:
+		host, owner, repo = parts[0], parts[1], parts[2]
+	default:
+		return "", "", fmt.Errorf("can't parse %q — expected owner/repo, host/owner/repo, or a full git URL", input)
+	}
+	if owner == "" || repo == "" {
+		return "", "", fmt.Errorf("can't parse %q — expected owner/repo, host/owner/repo, or a full git URL", input)
+	}
+
+	if protocol == "ssh" {
+		return fmt.Sprintf("git@%s:%s/%s.git", host, owner, repo), repo, nil
+	}
+	return fmt.Sprintf("https://%s/%s/%s.git", host, owner, repo), repo, nil
+}
+
+func repoNameFromURL(url string) string {
+	url = strings.TrimSuffix(strings.TrimSuffix(url, "/"), ".git")
+	if i := strings.LastIndexAny(url, "/:"); i >= 0 {
+		return url[i+1:]
+	}
+	return url
+}
+
+// CloneBare clones url as a bare repo into <scanRoot>/<name>/.bare and fixes
+// up the origin fetch refspec so `git fetch` behaves normally afterward
+// (plain `git clone --bare` doesn't wire this up). It returns the new repo's
+// container path and the remote's default branch.
+func CloneBare(scanRoot, name, url string) (repoPath string, defaultBranch string, err error) {
+	repoPath = filepath.Join(scanRoot, name)
+	bareDir := filepath.Join(repoPath, ".bare")
+	if _, err := os.Stat(repoPath); err == nil {
+		return "", "", fmt.Errorf("%s already exists", repoPath)
+	}
+
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		return "", "", fmt.Errorf("mkdir %s: %w", repoPath, err)
+	}
+
+	if out, err := exec.Command("git", "clone", "--bare", url, bareDir).CombinedOutput(); err != nil {
+		os.RemoveAll(repoPath)
+		return "", "", fmt.Errorf("git clone: %s", cleanGitOutput(out, err))
+	}
+
+	refspec := "+refs/heads/*:refs/remotes/origin/*"
+	if out, err := exec.Command("git", "-C", bareDir, "config", "remote.origin.fetch", refspec).CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("git config remote.origin.fetch: %s", cleanGitOutput(out, err))
+	}
+	if out, err := exec.Command("git", "-C", bareDir, "fetch", "origin").CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("git fetch: %s", cleanGitOutput(out, err))
+	}
+
+	branch, err := defaultRemoteBranch(url)
+	if err != nil || branch == "" {
+		branch = "main"
+	}
+
+	return repoPath, branch, nil
+}
+
+func defaultRemoteBranch(url string) (string, error) {
+	out, err := exec.Command("git", "ls-remote", "--symref", url, "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "ref: ") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "ref: "))
+		if len(fields) > 0 {
+			return strings.TrimPrefix(fields[0], "refs/heads/"), nil
+		}
+	}
+	return "", fmt.Errorf("could not determine default branch")
+}
+
 func detectWorkspace(path string) Workspace {
 	ws := Workspace{
 		Path: path,
 		Name: filepath.Base(path),
 		Type: TypePlain,
+	}
+
+	if bareDir, ok := bareGitDir(path); ok {
+		ws.Type = TypeGitRepo
+		ws.Worktrees = listWorktrees(bareDir)
+		return ws
 	}
 
 	repo, err := git.PlainOpen(path)
@@ -74,27 +282,35 @@ func listWorktrees(repoPath string) []WorktreeInfo {
 
 	var worktrees []WorktreeInfo
 	var current WorktreeInfo
+	var currentIsBare bool
+
+	flush := func() {
+		// The "bare" entry is the .bare admin directory itself, not a real
+		// worktree — git worktree list always includes it for bare repos.
+		if current.Path != "" && !currentIsBare {
+			worktrees = append(worktrees, current)
+		}
+	}
 
 	for _, line := range strings.Split(string(bytes.TrimSpace(out)), "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "worktree "):
-			if current.Path != "" {
-				worktrees = append(worktrees, current)
-			}
+			flush()
 			current = WorktreeInfo{Path: strings.TrimPrefix(line, "worktree ")}
+			currentIsBare = false
 		case strings.HasPrefix(line, "branch "):
 			ref := strings.TrimPrefix(line, "branch ")
 			current.Branch = strings.TrimPrefix(ref, "refs/heads/")
 		case line == "detached":
 			current.Branch = "HEAD (detached)"
+		case line == "bare":
+			currentIsBare = true
 		case line == "":
 			// blank line separates entries
 		}
 	}
-	if current.Path != "" {
-		worktrees = append(worktrees, current)
-	}
+	flush()
 
 	return worktrees
 }
