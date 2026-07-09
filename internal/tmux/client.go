@@ -45,6 +45,10 @@ func SwitchClient(session string) error {
 	return exec.Command("tmux", "switch-client", "-t", session).Run()
 }
 
+func KillSession(name string) error {
+	return exec.Command("tmux", "kill-session", "-t", name).Run()
+}
+
 func AttachSession(session string) error {
 	cmd := AttachSessionCmd(session)
 	cmd.Stdin = os.Stdin

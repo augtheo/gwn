@@ -35,6 +35,10 @@ type repoFetchedMsg struct {
 	repoPath string
 	err      error
 }
+type worktreeDeletedMsg struct {
+	repoPath string
+	err      error
+}
 type prListMsg struct {
 	repoPath string
 	prs      []scanner.PRInfo
@@ -81,6 +85,13 @@ type Model struct {
 	createRepoPath   string
 
 	cloningRepo bool
+
+	confirmingDeleteWorktree bool
+	deleteRepoPath           string
+	deleteWorktreePath       string
+	deleteWorktreeLabel      string
+	deleteSessionName        string
+	deleteHasSession         bool
 
 	fetchingPath string
 	spinnerFrame int
@@ -169,6 +180,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.confirmingDeleteWorktree {
+			switch msg.String() {
+			case "y", "enter":
+				repoPath, worktreePath := m.deleteRepoPath, m.deleteWorktreePath
+				sessionName, hasSession := m.deleteSessionName, m.deleteHasSession
+				m.cancelDeleteWorktree()
+				return m, m.deleteWorktree(repoPath, worktreePath, sessionName, hasSession)
+			default:
+				m.cancelDeleteWorktree()
+				return m, nil
+			}
+		}
+
 		if m.pickingPR {
 			if m.cfg.VimMode && m.mode == modeNormal {
 				return m.updatePickPRNormal(msg)
@@ -192,6 +216,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+f":
 			return m, m.startFetch()
+		case "ctrl+x":
+			m.startDeleteWorktree()
+			return m, nil
 		case "ctrl+r":
 			return m, m.startPickPR()
 		}
@@ -234,6 +261,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fetchingPath = ""
 		}
 		m.err = msg.err
+		return m, nil
+
+	case worktreeDeletedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.err = nil
+		m.refreshWorkspace(msg.repoPath)
 		return m, nil
 
 	case prListMsg:
@@ -494,16 +530,23 @@ func (m Model) View() string {
 		b.WriteString(styleHints.Render("enter: create worktree  esc: cancel"))
 	case m.cloningRepo:
 		b.WriteString(styleHints.Render("enter: clone  esc: cancel"))
+	case m.confirmingDeleteWorktree:
+		sessionNote := ""
+		if m.deleteHasSession {
+			sessionNote = " + kill its tmux session"
+		}
+		b.WriteString(lipgloss.NewStyle().Foreground(colRed).Render("  delete worktree "+m.deleteWorktreeLabel+sessionNote+"? ") +
+			styleHints.Render("y: confirm  any other key: cancel"))
 	case m.pickingPR:
 		b.WriteString(styleHints.Render("enter: checkout PR  esc: cancel"))
 	case m.cfg.VimMode && m.mode == modeNormal:
 		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
-			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^r: worktree/clone/fetch/review  q: quit"))
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
 			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate"))
 	default:
-		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
+		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
@@ -729,6 +772,50 @@ func (m Model) createWorktree(repoPath, branch string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := scanner.AddWorktree(repoPath, branch)
 		return worktreeCreatedMsg{repoPath: repoPath, err: err}
+	}
+}
+
+// startDeleteWorktree arms the delete confirmation for the selected worktree.
+// Only linked worktrees (wtIdx >= 0) qualify — the main worktree/bare
+// container row is never deletable this way.
+func (m *Model) startDeleteWorktree() {
+	if m.cursor >= len(m.filtered) {
+		return
+	}
+	item := m.filtered[m.cursor]
+	if item.wtIdx < 0 {
+		return
+	}
+	wt := item.ws.Worktrees[item.wtIdx]
+	m.confirmingDeleteWorktree = true
+	m.deleteRepoPath = item.ws.Path
+	m.deleteWorktreePath = wt.Path
+	m.deleteWorktreeLabel = wt.Branch
+	m.deleteSessionName = wt.TmuxSession
+	m.deleteHasSession = wt.HasSession
+}
+
+func (m *Model) cancelDeleteWorktree() {
+	m.confirmingDeleteWorktree = false
+	m.deleteRepoPath = ""
+	m.deleteWorktreePath = ""
+	m.deleteWorktreeLabel = ""
+	m.deleteSessionName = ""
+	m.deleteHasSession = false
+}
+
+func (m Model) deleteWorktree(repoPath, worktreePath, sessionName string, hasSession bool) tea.Cmd {
+	st := m.st
+	return func() tea.Msg {
+		if err := scanner.RemoveWorktree(repoPath, worktreePath); err != nil {
+			return worktreeDeletedMsg{repoPath: repoPath, err: err}
+		}
+		if hasSession {
+			_ = tmux.KillSession(sessionName)
+		}
+		st.Remove(worktreePath)
+		_ = st.Save()
+		return worktreeDeletedMsg{repoPath: repoPath}
 	}
 }
 
