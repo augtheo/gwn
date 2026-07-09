@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,7 +35,23 @@ type repoFetchedMsg struct {
 	repoPath string
 	err      error
 }
+type prListMsg struct {
+	repoPath string
+	prs      []scanner.PRInfo
+	err      error
+}
+type prCheckedOutMsg struct {
+	repoPath     string
+	worktreePath string
+	sessionName  string
+	branch       string
+	err          error
+}
 type spinnerTickMsg struct{}
+
+// prBranchPattern recognizes the local branch names FetchPR creates
+// ("pr-<n>"), so openPath knows to add a "diff" review window.
+var prBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
 
 type mode int
 
@@ -66,6 +84,13 @@ type Model struct {
 
 	fetchingPath string
 	spinnerFrame int
+
+	pickingPR  bool
+	prRepoPath string
+	prAll      []scanner.PRInfo
+	prFiltered []scanner.PRInfo
+	prCursor   int
+	prLoading  bool
 }
 
 type listItem struct {
@@ -144,6 +169,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.pickingPR {
+			if m.cfg.VimMode && m.mode == modeNormal {
+				return m.updatePickPRNormal(msg)
+			}
+			return m.updatePickPRInsert(msg)
+		}
+
 		// Chords available regardless of mode.
 		switch msg.String() {
 		case "ctrl+c":
@@ -160,6 +192,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+f":
 			return m, m.startFetch()
+		case "ctrl+r":
+			return m, m.startPickPR()
 		}
 
 		if m.cfg.VimMode && m.mode == modeNormal {
@@ -202,8 +236,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		return m, nil
 
+	case prListMsg:
+		if !m.pickingPR || m.prRepoPath != msg.repoPath {
+			return m, nil
+		}
+		m.prLoading = false
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.err = nil
+		m.prAll = msg.prs
+		m.refilterPR()
+		return m, nil
+
+	case prCheckedOutMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.err = nil
+		m.refreshWorkspace(msg.repoPath)
+		return m, m.openPath(msg.worktreePath, msg.sessionName, msg.branch)
+
 	case spinnerTickMsg:
-		if m.fetchingPath == "" {
+		if m.fetchingPath == "" && !m.prLoading {
 			return m, nil
 		}
 		m.spinnerFrame++
@@ -420,9 +477,13 @@ func (m Model) View() string {
 	}
 	b.WriteString(inputBorder.Width(inputWidth).Render(m.input.View()) + "\n\n")
 
-	start, end := m.visibleRange(m.listHeight())
-	for i := start; i < end && i < len(m.filtered); i++ {
-		b.WriteString(m.renderItem(i) + "\n")
+	if m.pickingPR {
+		b.WriteString(m.renderPRList() + "\n")
+	} else {
+		start, end := m.visibleRange(m.listHeight())
+		for i := start; i < end && i < len(m.filtered); i++ {
+			b.WriteString(m.renderItem(i) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
@@ -433,14 +494,16 @@ func (m Model) View() string {
 		b.WriteString(styleHints.Render("enter: create worktree  esc: cancel"))
 	case m.cloningRepo:
 		b.WriteString(styleHints.Render("enter: clone  esc: cancel"))
+	case m.pickingPR:
+		b.WriteString(styleHints.Render("enter: checkout PR  esc: cancel"))
 	case m.cfg.VimMode && m.mode == modeNormal:
 		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
-			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f: worktree/clone/fetch  q: quit"))
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^r: worktree/clone/fetch/review  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
 			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate"))
 	default:
-		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ↑↓: navigate  esc/ctrl+c: quit"))
+		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
@@ -520,6 +583,46 @@ func (m Model) renderItem(i int) string {
 		return styleSelected.Width(bodyWidth).Render(body) + branch + dot
 	}
 	return styleNormal.Render(body) + branch + dot
+}
+
+// renderPRList renders the Ctrl+R PR picker in place of the workspace list.
+func (m Model) renderPRList() string {
+	if m.prLoading && len(m.prAll) == 0 {
+		return styleHints.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)] + " loading PRs...")
+	}
+	if len(m.prFiltered) == 0 {
+		return styleHints.Render(" no open PRs")
+	}
+
+	height := m.listHeight()
+	start, end := 0, len(m.prFiltered)
+	if end > height {
+		start = m.prCursor - height/2
+		if start < 0 {
+			start = 0
+		}
+		end = start + height
+		if end > len(m.prFiltered) {
+			end = len(m.prFiltered)
+			start = end - height
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		pr := m.prFiltered[i]
+		body := fmt.Sprintf(" #%-6d %s", pr.Number, pr.Title)
+		author := styleBranch.Render(" @" + pr.Author)
+		if i == m.prCursor {
+			b.WriteString(styleSelected.Render(body) + author + "\n")
+		} else {
+			b.WriteString(styleNormal.Render(body) + author + "\n")
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func (m Model) icon(isGit bool) string {
@@ -822,16 +925,205 @@ func (m Model) openSelected() tea.Cmd {
 		sessionName = tmux.SessionName(m.cfg.SessionPrefix, dir)
 	}
 
+	return m.openPath(dir, sessionName, branch)
+}
+
+// openPath prepares and opens a tmux session for dir/sessionName. If branch
+// matches the "pr-<n>" convention FetchPR creates, an extra "diff" window is
+// added running cfg.ReviewCommand for that PR number.
+func (m Model) openPath(dir, sessionName, branch string) tea.Cmd {
+	extraName, extraCmd := "", ""
+	if match := prBranchPattern.FindStringSubmatch(branch); match != nil {
+		extraName = "diff"
+		extraCmd = strings.ReplaceAll(m.cfg.ReviewCommand, "{pr}", match[1])
+	}
+
 	cfg := m.cfg
 	st := m.st
 
 	return func() tea.Msg {
-		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.Assistant)
+		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.Assistant, extraName, extraCmd)
 		if err != nil {
 			return errMsg(err)
 		}
 		st.Touch(dir, sessionName)
 		_ = st.Save()
 		return sessionReadyMsg{attachCmd: attachCmd}
+	}
+}
+
+// startPickPR opens the Ctrl+R PR picker for the selected bare-repo row,
+// kicking off an async gh pr list load. Returns nil if the selection is not
+// a bare repo container row.
+func (m *Model) startPickPR() tea.Cmd {
+	if m.cursor >= len(m.filtered) {
+		return nil
+	}
+	item := m.filtered[m.cursor]
+	if item.wtIdx != -1 || !item.ws.IsBare {
+		return nil
+	}
+
+	m.pickingPR = true
+	m.prRepoPath = item.ws.Path
+	m.prAll = nil
+	m.prFiltered = nil
+	m.prCursor = 0
+	m.prLoading = true
+	m.spinnerFrame = 0
+	m.input.SetValue("")
+	m.input.Placeholder = "filter PRs for " + item.ws.Name + "..."
+	m.restoreFocusForMode()
+
+	return m.loadPRs(item.ws.Path)
+}
+
+func (m *Model) cancelPickPR() {
+	m.pickingPR = false
+	m.prRepoPath = ""
+	m.prAll = nil
+	m.prFiltered = nil
+	m.prLoading = false
+	m.input.SetValue("")
+	m.input.Placeholder = "search workspaces..."
+	m.restoreFocusForMode()
+}
+
+// updatePickPRNormal handles keys in the PR picker while in vim Normal
+// mode: single keys navigate and act, matching the main list's convention.
+func (m Model) updatePickPRNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c", "q":
+		m.cancelPickPR()
+		return m, nil
+	case "i", "a":
+		m.mode = modeInsert
+		m.input.CursorEnd()
+		return m, m.input.Focus()
+	case "/":
+		m.input.SetValue("")
+		m.refilterPR()
+		m.mode = modeInsert
+		return m, m.input.Focus()
+	case "enter":
+		return m.confirmPickPR()
+	case "j", "down", "ctrl+n", "ctrl+j":
+		m.movePRCursor(1)
+		return m, nil
+	case "k", "up", "ctrl+p", "ctrl+k":
+		m.movePRCursor(-1)
+		return m, nil
+	}
+	return m, nil
+}
+
+// updatePickPRInsert handles keys in the PR picker while typing filters —
+// either because vim mode is disabled, or the user pressed "i"/"a"/"/".
+func (m Model) updatePickPRInsert(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.cfg.VimMode {
+			m.mode = modeNormal
+			m.input.Blur()
+			return m, nil
+		}
+		m.cancelPickPR()
+		return m, nil
+	case "ctrl+c":
+		m.cancelPickPR()
+		return m, nil
+	case "enter":
+		return m.confirmPickPR()
+	case "up", "ctrl+p", "ctrl+k":
+		m.movePRCursor(-1)
+		return m, nil
+	case "down", "ctrl+n", "ctrl+j":
+		m.movePRCursor(1)
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.refilterPR()
+		return m, cmd
+	}
+}
+
+// confirmPickPR checks out the highlighted PR, closing the picker first.
+func (m Model) confirmPickPR() (tea.Model, tea.Cmd) {
+	if m.prCursor >= len(m.prFiltered) {
+		return m, nil
+	}
+	pr := m.prFiltered[m.prCursor]
+	repoPath := m.prRepoPath
+	m.cancelPickPR()
+	return m, m.checkoutPR(repoPath, pr.Number)
+}
+
+func (m Model) loadPRs(repoPath string) tea.Cmd {
+	load := func() tea.Msg {
+		prs, err := scanner.ListOpenPRs(repoPath)
+		return prListMsg{repoPath: repoPath, prs: prs, err: err}
+	}
+	return tea.Batch(load, spinnerTick())
+}
+
+func (m *Model) movePRCursor(delta int) {
+	if len(m.prFiltered) == 0 {
+		return
+	}
+	m.prCursor += delta
+	if m.prCursor < 0 {
+		m.prCursor = 0
+	}
+	if m.prCursor > len(m.prFiltered)-1 {
+		m.prCursor = len(m.prFiltered) - 1
+	}
+}
+
+// refilterPR rebuilds prFiltered from prAll using the shared search input as
+// a fuzzy filter over "#<number> <title> <author>".
+func (m *Model) refilterPR() {
+	query := m.input.Value()
+	if query == "" {
+		m.prFiltered = m.prAll
+		if m.prCursor >= len(m.prFiltered) {
+			m.prCursor = 0
+		}
+		return
+	}
+
+	labels := make([]string, len(m.prAll))
+	for i, pr := range m.prAll {
+		labels[i] = fmt.Sprintf("#%d %s %s", pr.Number, pr.Title, pr.Author)
+	}
+	matches := fuzzy.Find(query, labels)
+	filtered := make([]scanner.PRInfo, 0, len(matches))
+	for _, match := range matches {
+		filtered = append(filtered, m.prAll[match.Index])
+	}
+	m.prFiltered = filtered
+	if m.prCursor >= len(m.prFiltered) {
+		m.prCursor = 0
+	}
+}
+
+// checkoutPR fetches PR n for repoPath and creates a worktree for it, then
+// reports the session name to open (WorktreeSessionName needs the repo name,
+// computed here rather than threaded through the message).
+func (m Model) checkoutPR(repoPath string, n int) tea.Cmd {
+	repoName := filepath.Base(repoPath)
+	sessionPrefix := m.cfg.SessionPrefix
+
+	return func() tea.Msg {
+		branch, err := scanner.FetchPR(repoPath, n)
+		if err != nil {
+			return prCheckedOutMsg{repoPath: repoPath, err: err}
+		}
+		dest, err := scanner.AddWorktree(repoPath, branch)
+		if err != nil {
+			return prCheckedOutMsg{repoPath: repoPath, err: err}
+		}
+		sessionName := tmux.WorktreeSessionName(sessionPrefix, repoName, branch)
+		return prCheckedOutMsg{repoPath: repoPath, worktreePath: dest, sessionName: sessionName, branch: branch}
 	}
 }

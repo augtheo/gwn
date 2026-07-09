@@ -38,7 +38,7 @@ func runOpen(cmd *cobra.Command, args []string) error {
 	}
 
 	session := tmux.SessionName(cfg.SessionPrefix, abs)
-	if err := tmux.OpenWorkspace(session, abs, cfg.Editor, cfg.Assistant); err != nil {
+	if err := tmux.OpenWorkspace(session, abs, cfg.Editor, cfg.Assistant, "", ""); err != nil {
 		return err
 	}
 
