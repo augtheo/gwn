@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -143,6 +144,85 @@ func Fetch(repoPath string) error {
 		return fmt.Errorf("git fetch: %s", cleanGitOutput(out, err))
 	}
 	return nil
+}
+
+// PRInfo is a single open pull request, as shown in the Ctrl+R picker.
+type PRInfo struct {
+	Number int
+	Title  string
+	Author string
+}
+
+// remoteSlug derives "owner/repo" from the origin remote URL, so gh commands
+// can target the right repo explicitly rather than relying on gh's own
+// cwd-based detection (which is untested against the .bare layout).
+func remoteSlug(gitDir string) (string, error) {
+	out, err := exec.Command("git", "-C", gitDir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return "", fmt.Errorf("git remote get-url origin: %w", err)
+	}
+	url := strings.TrimSuffix(strings.TrimSpace(string(out)), "/")
+	url = strings.TrimSuffix(url, ".git")
+	parts := strings.Split(url, "/")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("can't parse remote url %q", url)
+	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1], nil
+}
+
+// ListOpenPRs fetches open pull requests for repoPath's origin remote via the
+// gh CLI. Like CloneBare/Fetch, this is an explicit user-triggered network
+// call (see AGENTS.md's "no network calls" exceptions).
+func ListOpenPRs(repoPath string) ([]PRInfo, error) {
+	gitDir := repoPath
+	if dir, ok := bareGitDir(repoPath); ok {
+		gitDir = dir
+	}
+
+	slug, err := remoteSlug(gitDir)
+	if err != nil {
+		return nil, err
+	}
+
+	out, err := exec.Command("gh", "pr", "list", "--repo", slug, "--json", "number,title,author", "--limit", "50").Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh pr list: %w", err)
+	}
+
+	var raw []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parse gh pr list output: %w", err)
+	}
+
+	prs := make([]PRInfo, len(raw))
+	for i, r := range raw {
+		prs[i] = PRInfo{Number: r.Number, Title: r.Title, Author: r.Author.Login}
+	}
+	return prs, nil
+}
+
+// FetchPR fetches PR number n's head ref from origin into a local branch
+// named "pr-<n>", so AddWorktree can create a worktree for it exactly like
+// any other branch — it just sees a ref under refs/heads/.
+func FetchPR(repoPath string, n int) (branch string, err error) {
+	gitDir := repoPath
+	if dir, ok := bareGitDir(repoPath); ok {
+		gitDir = dir
+	}
+
+	branch = fmt.Sprintf("pr-%d", n)
+	refspec := fmt.Sprintf("pull/%d/head:%s", n, branch)
+	out, err := exec.Command("git", "-C", gitDir, "fetch", "origin", refspec, "--force").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git fetch %s: %s", refspec, cleanGitOutput(out, err))
+	}
+	return branch, nil
 }
 
 func cleanGitOutput(out []byte, err error) string {
