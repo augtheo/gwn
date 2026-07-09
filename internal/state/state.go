@@ -94,6 +94,11 @@ func (s *State) Touch(path, session string) {
 	s.Workspaces[path] = ws
 }
 
+// Remove drops path's tracked state, e.g. after its worktree is deleted.
+func (s *State) Remove(path string) {
+	delete(s.Workspaces, path)
+}
+
 func statePath() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "gwn", "state.json")
