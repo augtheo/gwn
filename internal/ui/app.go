@@ -320,7 +320,12 @@ func (m Model) updateNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.mode = modeInsert
 		return m, m.input.Focus()
-	case "enter", "l":
+	case "enter":
+		return m, m.openSelected()
+	case "l":
+		if m.expandSelected() {
+			return m, nil
+		}
 		return m, m.openSelected()
 	case "j", "down", "ctrl+n", "ctrl+j":
 		m.moveCursor(count)
@@ -483,7 +488,7 @@ func (m Model) renderItem(i int) string {
 	icon := m.icon(ws.Type == scanner.TypeGitRepo)
 
 	expandHint := ""
-	if ws.Type == scanner.TypeGitRepo && len(ws.Worktrees) > 1 {
+	if canExpand(ws) {
 		if m.expanded[ws.Path] {
 			expandHint = " ▾"
 		} else {
@@ -535,11 +540,41 @@ func (m *Model) toggleExpand() {
 		return
 	}
 	item := m.filtered[m.cursor]
-	if item.wtIdx >= 0 || item.ws.Type != scanner.TypeGitRepo || len(item.ws.Worktrees) <= 1 {
+	if item.wtIdx >= 0 || !canExpand(item.ws) {
 		return
 	}
 	m.expanded[item.ws.Path] = !m.expanded[item.ws.Path]
 	m.refilter()
+}
+
+// expandSelected implements vim tree-navigation "l": if the selected row is a
+// collapsed, expandable repo, reveal its worktrees instead of opening it.
+// Returns true if it expanded, so the caller skips the open action.
+func (m *Model) expandSelected() bool {
+	if m.cursor >= len(m.filtered) {
+		return false
+	}
+	item := m.filtered[m.cursor]
+	if item.wtIdx >= 0 || !canExpand(item.ws) || m.expanded[item.ws.Path] {
+		return false
+	}
+	m.expanded[item.ws.Path] = true
+	m.refilter()
+	return true
+}
+
+// canExpand reports whether ws's top-level row has worktree children worth
+// revealing. A bare-layout repo (ws.Path itself has no working tree) can
+// expand with even a single worktree; a plain repo's Worktrees list already
+// includes itself as the first entry, so it only expands past that.
+func canExpand(ws scanner.Workspace) bool {
+	if ws.Type != scanner.TypeGitRepo {
+		return false
+	}
+	if ws.IsBare {
+		return len(ws.Worktrees) >= 1
+	}
+	return len(ws.Worktrees) > 1
 }
 
 func (m *Model) startCreateWorktree() {
@@ -566,6 +601,7 @@ func (m *Model) beginWorktreePrompt(repoPath, repoName, prefill string) {
 	m.input.SetValue(prefill)
 	m.input.CursorEnd()
 	m.input.Placeholder = "new worktree branch for " + repoName + "..."
+	m.input.Focus()
 }
 
 func (m *Model) cancelCreateWorktree() {
@@ -573,6 +609,17 @@ func (m *Model) cancelCreateWorktree() {
 	m.createRepoPath = ""
 	m.input.SetValue("")
 	m.input.Placeholder = "search workspaces..."
+	m.restoreFocusForMode()
+}
+
+// restoreFocusForMode re-applies vim mode's focus invariant (input focused
+// only in insert mode) after leaving a modal prompt like worktree creation.
+func (m *Model) restoreFocusForMode() {
+	if m.cfg.VimMode && m.mode == modeNormal {
+		m.input.Blur()
+	} else {
+		m.input.Focus()
+	}
 }
 
 func (m Model) createWorktree(repoPath, branch string) tea.Cmd {
@@ -586,12 +633,14 @@ func (m *Model) startCloneRepo() {
 	m.cloningRepo = true
 	m.input.SetValue("")
 	m.input.Placeholder = "clone repo (owner/repo or git URL)..."
+	m.input.Focus()
 }
 
 func (m *Model) cancelCloneRepo() {
 	m.cloningRepo = false
 	m.input.SetValue("")
 	m.input.Placeholder = "search workspaces..."
+	m.restoreFocusForMode()
 }
 
 func (m Model) cloneRepo(src string) tea.Cmd {
@@ -750,6 +799,11 @@ func (m Model) openSelected() tea.Cmd {
 		return nil
 	}
 	item := m.filtered[m.cursor]
+	if item.wtIdx < 0 && item.ws.IsBare {
+		// The bare container itself has no working tree to open — only its
+		// worktrees (revealed by expanding) are checkoutable.
+		return nil
+	}
 
 	var dir, branch string
 	if item.wtIdx >= 0 {
