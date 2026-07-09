@@ -26,6 +26,9 @@ type Workspace struct {
 	Type      WorkspaceType
 	Branch    string
 	Worktrees []WorktreeInfo
+	// IsBare is true for the <repo>/.bare container layout, where Path itself
+	// holds no working tree — only its Worktrees are actually checked out.
+	IsBare bool
 	// set after reconcile with state
 	TmuxSession string
 	HasSession  bool
@@ -246,6 +249,7 @@ func detectWorkspace(path string) Workspace {
 
 	if bareDir, ok := bareGitDir(path); ok {
 		ws.Type = TypeGitRepo
+		ws.IsBare = true
 		ws.Worktrees = listWorktrees(bareDir)
 		return ws
 	}
