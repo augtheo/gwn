@@ -107,6 +107,23 @@ func AddWorktree(repoPath, branch string) (string, error) {
 	return dest, nil
 }
 
+// RemoveWorktree removes the worktree at worktreePath from repoPath (its
+// .bare dir if bare-structured, otherwise the repo itself). git refuses this
+// if the worktree has uncommitted or untracked changes, which surfaces here
+// as an error rather than being force-removed.
+func RemoveWorktree(repoPath, worktreePath string) error {
+	gitDir := repoPath
+	if dir, ok := bareGitDir(repoPath); ok {
+		gitDir = dir
+	}
+
+	out, err := exec.Command("git", "-C", gitDir, "worktree", "remove", worktreePath).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git worktree remove: %s", cleanGitOutput(out, err))
+	}
+	return nil
+}
+
 func refExists(gitDir, ref string) bool {
 	cmd := exec.Command("git", "-C", gitDir, "show-ref", "--verify", "--quiet", ref)
 	return cmd.Run() == nil
