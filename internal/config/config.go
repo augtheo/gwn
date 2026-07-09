@@ -19,6 +19,7 @@ type Config struct {
 	VimMode          bool               `toml:"vim_mode"`
 	DefaultGitHost   string             `toml:"default_git_host"`
 	CloneProtocol    string             `toml:"clone_protocol"`
+	ReviewCommand    string             `toml:"review_command"`
 	BranchPrefixes   []BranchPrefixRule `toml:"branch_prefixes"`
 	Appearance       Appearance         `toml:"appearance"`
 }
@@ -113,6 +114,7 @@ func defaults() *Config {
 		VimMode:          true,
 		DefaultGitHost:   "github.com",
 		CloneProtocol:    "https",
+		ReviewCommand:    "gh pr diff {pr} | delta --side-by-side --paging=always",
 		Appearance:       Appearance{Theme: "mocha"},
 	}
 }

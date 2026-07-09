@@ -15,7 +15,7 @@ A terminal workspace navigator. Scans configured project directories, detects gi
   cognite-sdk  main ○
   scripts  ○
 
- NORMAL  i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f: worktree/clone/fetch  q: quit
+ NORMAL  i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^r: worktree/clone/fetch/review  q: quit
 ```
 
 ## Features
@@ -26,6 +26,7 @@ A terminal workspace navigator. Scans configured project directories, detects gi
 - Create new worktrees on the fly with `Ctrl+W`
 - Clone a remote as a new bare repo with `Ctrl+G`, ready for worktrees from the start
 - Fetch a repo from `origin` with `Ctrl+F`, with a spinner on its row while it runs
+- Review a PR with `Ctrl+R` on a bare repo — pick from its open PRs, and gwn fetches it, creates a worktree, and opens a session with an extra `diff` window
 - MRU ordering — most recently opened workspaces float to the top
 - Tmux session management — creates sessions on demand with two default windows:
   - `editor` — `nvim .`
@@ -39,6 +40,8 @@ A terminal workspace navigator. Scans configured project directories, detects gi
 - tmux 3.3+
 - A Nerd Font (for icons — optional, configurable)
 - `git` in PATH (for worktree listing, and `git clone`/`fetch` if you use `Ctrl+G`/`Ctrl+F`)
+- `gh` (GitHub CLI, authenticated) in PATH if you use `Ctrl+R` to review PRs
+- [`delta`](https://github.com/dandavison/delta) in PATH for the default `review_command`'s syntax-highlighted, side-by-side diffs (optional — swap `review_command` for `gh pr diff {pr} | less -R` if you'd rather not install it)
 
 ## Installation
 
@@ -94,6 +97,7 @@ nerd_font_icons   = true  # set false if your terminal doesn't have Nerd Fonts
 vim_mode          = true  # start in modal Normal mode; false = classic always-typing search
 default_git_host  = "github.com" # host assumed for "owner/repo" shorthand with Ctrl+G
 clone_protocol    = "https"      # "https" or "ssh" — used to build the clone URL for shorthand forms
+review_command    = "gh pr diff {pr} | delta --side-by-side --paging=always" # run in the "diff" window after Ctrl+R checkout; {pr} is the PR number
 
 # Auto-prefix new branch names (Ctrl+W) for repos under a given path.
 # Matched by longest path prefix; repos outside all of these get no prefix.
@@ -149,6 +153,7 @@ before.
 | `Ctrl+W` | Create a new worktree for the selected repo (prompts for branch name) |
 | `Ctrl+G` | Clone a remote repo as a new bare repo (prompts for owner/repo or a URL) |
 | `Ctrl+F` | Fetch the selected repo from `origin` (shows a spinner on its row while running) |
+| `Ctrl+R` | On a bare repo, open a picker of its open PRs; confirming checks one out and opens its session |
 | `q` / `Esc` / `Ctrl+C` | Quit |
 
 ### Insert mode
@@ -202,14 +207,27 @@ This bare + worktree layout is the recommended way to work with a repo in `gwn`:
 
 `gwn` doesn't migrate existing plain repos into this layout automatically — if you want an existing repo to use it, convert it manually (move its `.git` to `.bare`, set `core.bare = true`, then `git worktree add`).
 
+## Reviewing a PR
+
+`gwn` doesn't help you find which PRs to review — use `gh pr list --search "review-requested:@me"` or the [`gh dash`](https://github.com/dlvhdr/gh-dash) TUI for that. Once you know which repo, select its bare-repo row and press `Ctrl+R`:
+
+1. `gwn` fetches the repo's open PRs via `gh pr list` and shows a picker (number, title, author). Type to fuzzy-filter, `↑`/`↓` to move.
+2. `Enter` on a PR fetches its head ref (`git fetch origin pull/<n>/head:pr-<n>`) and creates a worktree for it — same underlying mechanism as `Ctrl+W`, just skipping the branch-name prompt.
+3. The tmux session opens automatically with a fourth window, `diff`, running `review_command` (default `gh pr diff <n> | delta --side-by-side --paging=always`) for a syntax-highlighted, side-by-side view of the diff.
+
+From there:
+- Use the `ai` window's assistant to review — e.g. Claude Code's `review` skill.
+- For leaving inline comments, use a tool with real PR support in the terminal, like [`octo.nvim`](https://github.com/pwntester/octo.nvim) in the `editor` window, or `gh pr review`/`gh pr comment` from a shell.
+
 ## How sessions work
 
 When you open a workspace:
 
 1. If a tmux session for that workspace already exists → switch to it.
-2. If not → create a new session with two windows:
+2. If not → create a new session with two windows (three if opened via `Ctrl+R`):
    - Window 0 `editor`: runs `nvim .` in the workspace directory
    - Window 1 `ai`: runs `claude` (or your configured assistant)
+   - Window 2 `diff` (PR worktrees only): runs `review_command` for that PR
 
 Session names are derived from the directory name (or `reponame-branchname` for worktrees), with non-alphanumeric characters replaced by `-`.
 
