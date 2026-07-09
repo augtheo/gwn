@@ -37,8 +37,8 @@ func sanitize(prefix, s string) string {
 // attached client detaches. Only safe to call when nothing else is reading
 // os.Stdin — for callers running inside a bubbletea Program, use PrepareOpen
 // instead and run the returned command via tea.ExecProcess.
-func OpenWorkspace(session, dir, editor, assistant string) error {
-	cmd, err := PrepareOpen(session, dir, editor, assistant)
+func OpenWorkspace(session, dir, editor, assistant, extraWindowName, extraWindowCmd string) error {
+	cmd, err := PrepareOpen(session, dir, editor, assistant, extraWindowName, extraWindowCmd)
 	if err != nil {
 		return err
 	}
@@ -56,10 +56,13 @@ func OpenWorkspace(session, dir, editor, assistant string) error {
 // terminal. It returns a nil command when no attach is needed, i.e. the
 // target session was already reached via switch-client from inside tmux.
 //
+// extraWindowName/extraWindowCmd optionally add a fourth window (e.g. "diff"
+// for PR review sessions) alongside "editor"/"ai"; pass "", "" to skip it.
+//
 // Setup here never touches stdio, so it's safe to call while another process
 // (like a bubbletea Program) is reading os.Stdin. Only the returned attach
 // command needs exclusive access to the terminal.
-func PrepareOpen(session, dir, editor, assistant string) (*exec.Cmd, error) {
+func PrepareOpen(session, dir, editor, assistant, extraWindowName, extraWindowCmd string) (*exec.Cmd, error) {
 	if HasSession(session) {
 		if InsideTmux() {
 			return nil, SwitchClient(session)
@@ -80,6 +83,11 @@ func PrepareOpen(session, dir, editor, assistant string) (*exec.Cmd, error) {
 	if err := NewWindow(session, "ai", dir); err != nil {
 		return nil, err
 	}
+	if extraWindowName != "" {
+		if err := NewWindow(session, extraWindowName, dir); err != nil {
+			return nil, err
+		}
+	}
 	if err := SelectWindow(session, "shell"); err != nil {
 		return nil, err
 	}
@@ -93,7 +101,13 @@ func PrepareOpen(session, dir, editor, assistant string) (*exec.Cmd, error) {
 		if err := SendKeysToWindow(session, "editor", editor); err != nil {
 			return nil, err
 		}
-		return nil, SendKeysToWindow(session, "ai", assistant)
+		if err := SendKeysToWindow(session, "ai", assistant); err != nil {
+			return nil, err
+		}
+		if extraWindowName != "" {
+			return nil, SendKeysToWindow(session, extraWindowName, extraWindowCmd)
+		}
+		return nil, nil
 	}
 
 	// Outside tmux: send keys before attaching (attach blocks; programs will
@@ -103,6 +117,11 @@ func PrepareOpen(session, dir, editor, assistant string) (*exec.Cmd, error) {
 	}
 	if err := SendKeysToWindow(session, "ai", assistant); err != nil {
 		return nil, err
+	}
+	if extraWindowName != "" {
+		if err := SendKeysToWindow(session, extraWindowName, extraWindowCmd); err != nil {
+			return nil, err
+		}
 	}
 	return AttachSessionCmd(session), nil
 }
