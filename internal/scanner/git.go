@@ -233,15 +233,16 @@ func cleanGitOutput(out []byte, err error) string {
 	return msg
 }
 
-// ResolveCloneSource turns a user-provided clone target into a git clone URL
-// and a repo name. Accepted forms: "owner/repo" (uses defaultHost),
+// ResolveCloneSource turns a user-provided clone target into a git clone URL,
+// a repo name, and the owner (used to pick which scan_path to clone into —
+// see CloneBare). Accepted forms: "owner/repo" (uses defaultHost),
 // "host/owner/repo", or a full "git@..."/"https://..." URL. protocol controls
 // the URL built for the shorthand forms ("https" or "ssh"); it's ignored for
 // forms that already spell out a full URL.
-func ResolveCloneSource(input, defaultHost, protocol string) (url string, name string, err error) {
+func ResolveCloneSource(input, defaultHost, protocol string) (url string, name string, owner string, err error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
-		return "", "", fmt.Errorf("repo required")
+		return "", "", "", fmt.Errorf("repo required")
 	}
 	if defaultHost == "" {
 		defaultHost = "github.com"
@@ -251,37 +252,47 @@ func ResolveCloneSource(input, defaultHost, protocol string) (url string, name s
 	}
 
 	if strings.Contains(input, "://") || strings.HasPrefix(input, "git@") {
-		return input, repoNameFromURL(input), nil
+		name, owner = repoNameAndOwnerFromURL(input)
+		return input, name, owner, nil
 	}
 
 	trimmed := strings.TrimSuffix(strings.TrimSuffix(input, "/"), ".git")
 	parts := strings.Split(trimmed, "/")
 
-	var host, owner, repo string
+	var host, repo string
 	switch len(parts) {
 	case 2:
 		host, owner, repo = defaultHost, parts[0], parts[1]
 	case 3:
 		host, owner, repo = parts[0], parts[1], parts[2]
 	default:
-		return "", "", fmt.Errorf("can't parse %q — expected owner/repo, host/owner/repo, or a full git URL", input)
+		return "", "", "", fmt.Errorf("can't parse %q — expected owner/repo, host/owner/repo, or a full git URL", input)
 	}
 	if owner == "" || repo == "" {
-		return "", "", fmt.Errorf("can't parse %q — expected owner/repo, host/owner/repo, or a full git URL", input)
+		return "", "", "", fmt.Errorf("can't parse %q — expected owner/repo, host/owner/repo, or a full git URL", input)
 	}
 
 	if protocol == "ssh" {
-		return fmt.Sprintf("git@%s:%s/%s.git", host, owner, repo), repo, nil
+		return fmt.Sprintf("git@%s:%s/%s.git", host, owner, repo), repo, owner, nil
 	}
-	return fmt.Sprintf("https://%s/%s/%s.git", host, owner, repo), repo, nil
+	return fmt.Sprintf("https://%s/%s/%s.git", host, owner, repo), repo, owner, nil
 }
 
-func repoNameFromURL(url string) string {
+// repoNameAndOwnerFromURL extracts the repo name and owner from a full
+// "git@host:owner/repo.git" or "https://host/owner/repo.git" URL.
+func repoNameAndOwnerFromURL(url string) (name string, owner string) {
 	url = strings.TrimSuffix(strings.TrimSuffix(url, "/"), ".git")
-	if i := strings.LastIndexAny(url, "/:"); i >= 0 {
-		return url[i+1:]
+	// Split on both '/' and ':' so "git@host:owner/repo" and
+	// "https://host/owner/repo" are handled the same way.
+	segs := strings.FieldsFunc(url, func(r rune) bool { return r == '/' || r == ':' })
+	switch len(segs) {
+	case 0:
+		return "", ""
+	case 1:
+		return segs[0], ""
+	default:
+		return segs[len(segs)-1], segs[len(segs)-2]
 	}
-	return url
 }
 
 // CloneBare clones url as a bare repo into <scanRoot>/<name>/.bare and fixes

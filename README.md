@@ -201,7 +201,9 @@ Press `Ctrl+G` from anywhere in the list and type a repo to clone:
 
 Shorthand forms (`owner/repo`, `host/owner/repo`) are built using `clone_protocol` from config — `https` by default, so cloning works out of the box via your credential helper / `gh` auth with no SSH key setup. Set `clone_protocol = "ssh"` if you'd rather use `git@host:owner/repo.git`. Either way, typing a full URL always overrides this.
 
-`gwn` clones it as a **bare** repo into `<first scan_path>/<repo-name>/.bare`, and fixes up the origin fetch refspec (plain `git clone --bare` doesn't wire this up, so `git fetch` wouldn't otherwise update remote-tracking branches). It then detects the remote's default branch and prompts you to create the first worktree, pre-filled with that branch name — hit `Enter` to accept it or type a different one.
+`gwn` clones it as a **bare** repo into `<repo-name>/.bare`, and fixes up the origin fetch refspec (plain `git clone --bare` doesn't wire this up, so `git fetch` wouldn't otherwise update remote-tracking branches). It then detects the remote's default branch and prompts you to create the first worktree, pre-filled with that branch name — hit `Enter` to accept it or type a different one.
+
+The containing `scan_path` is picked by matching the repo's owner against your configured `scan_paths` by directory name (e.g. cloning `acmecorp/example-tool` lands under a `scan_paths` entry named `acmecorp`, case-insensitively) — falling back to the first `scan_path` if none match.
 
 This bare + worktree layout is the recommended way to work with a repo in `gwn`: because `gwn` only scans one directory level deep and skips dotfiles, worktrees nested inside `<repo>/` (as `<repo>/<branch>`) never show up as duplicate top-level entries the way sibling-directory worktrees can for plain repos.
 

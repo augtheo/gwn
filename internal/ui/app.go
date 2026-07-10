@@ -842,11 +842,18 @@ func (m Model) cloneRepo(src string) tea.Cmd {
 		if len(scanPaths) == 0 {
 			return repoClonedMsg{err: fmt.Errorf("no scan_paths configured")}
 		}
-		url, name, err := scanner.ResolveCloneSource(src, defaultHost, protocol)
+		url, name, owner, err := scanner.ResolveCloneSource(src, defaultHost, protocol)
 		if err != nil {
 			return repoClonedMsg{err: err}
 		}
-		repoPath, branch, err := scanner.CloneBare(scanPaths[0], name, url)
+		scanRoot := scanPaths[0]
+		for _, p := range scanPaths {
+			if strings.EqualFold(filepath.Base(p), owner) {
+				scanRoot = p
+				break
+			}
+		}
+		repoPath, branch, err := scanner.CloneBare(scanRoot, name, url)
 		if err != nil {
 			return repoClonedMsg{err: err}
 		}
