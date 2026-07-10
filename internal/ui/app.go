@@ -544,7 +544,7 @@ func (m Model) View() string {
 			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
-			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate"))
+			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
 	default:
 		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
