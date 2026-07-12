@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -434,29 +433,30 @@ func listWorktrees(repoPath string) []WorktreeInfo {
 	}
 	flush()
 
-	var wg sync.WaitGroup
-	for i := range worktrees {
-		wg.Add(1)
-		go func(wt *WorktreeInfo) {
-			defer wg.Done()
-			annotateWorktree(wt)
-		}(&worktrees[i])
-	}
-	wg.Wait()
-
 	return worktrees
 }
 
-// annotateWorktree fills in the status fields (dirty, merged, pushed, last
-// commit) for a single worktree via a handful of git subprocess calls
-// against its own path — this works for linked worktrees too, since git
-// resolves refs against the shared repo regardless of which worktree's
-// directory the command runs from.
-func annotateWorktree(wt *WorktreeInfo) {
-	wt.Dirty = hasUncommittedChanges(wt.Path)
-	wt.LastCommit = lastCommitTime(wt.Path)
-	wt.MergedLocal = isMergedToLocalMain(wt.Path)
-	wt.PushedRemote = isPushedToRemote(wt.Path, wt.Branch)
+// WorktreeStatus holds the status fields that require a handful of git
+// subprocess calls to compute (dirty, merged, pushed, last commit). Split out
+// from listWorktrees so callers can fetch this lazily, in the background,
+// instead of blocking the initial scan on every worktree in every repo.
+type WorktreeStatus struct {
+	Dirty        bool
+	MergedLocal  bool
+	PushedRemote bool
+	LastCommit   time.Time
+}
+
+// AnnotateWorktree computes path's status fields against its own directory —
+// this works for linked worktrees too, since git resolves refs against the
+// shared repo regardless of which worktree's directory the command runs from.
+func AnnotateWorktree(path, branch string) WorktreeStatus {
+	return WorktreeStatus{
+		Dirty:        hasUncommittedChanges(path),
+		LastCommit:   lastCommitTime(path),
+		MergedLocal:  isMergedToLocalMain(path),
+		PushedRemote: isPushedToRemote(path, branch),
+	}
 }
 
 func hasUncommittedChanges(path string) bool {

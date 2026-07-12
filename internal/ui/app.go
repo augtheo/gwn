@@ -52,6 +52,11 @@ type prCheckedOutMsg struct {
 	err          error
 }
 type spinnerTickMsg struct{}
+type worktreeStatusMsg struct {
+	repoPath     string
+	worktreePath string
+	status       scanner.WorktreeStatus
+}
 
 // prBranchPattern recognizes the local branch names FetchPR creates
 // ("pr-<n>"), so openPath knows to add a "diff" review window.
@@ -135,7 +140,30 @@ func New(cfg *config.Config, st *state.State, workspaces []scanner.Workspace) Mo
 }
 
 func (m Model) Init() tea.Cmd {
-	return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	for _, ws := range m.all {
+		cmds = append(cmds, annotateWorktreesCmd(ws))
+	}
+	return tea.Batch(cmds...)
+}
+
+// annotateWorktreesCmd kicks off one background git-status lookup per
+// worktree in ws (dirty/merged/pushed/last-commit), so the tree can render
+// immediately and fill in status as each lookup finishes rather than
+// blocking the initial scan on every worktree in every repo.
+func annotateWorktreesCmd(ws scanner.Workspace) tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(ws.Worktrees))
+	for _, wt := range ws.Worktrees {
+		wt := wt
+		cmds = append(cmds, func() tea.Msg {
+			return worktreeStatusMsg{
+				repoPath:     ws.Path,
+				worktreePath: wt.Path,
+				status:       scanner.AnnotateWorktree(wt.Path, wt.Branch),
+			}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -243,8 +271,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.refreshWorkspace(msg.repoPath)
-		return m, nil
+		return m, m.refreshWorkspace(msg.repoPath)
 
 	case repoClonedMsg:
 		if msg.err != nil {
@@ -252,9 +279,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.refreshWorkspace(msg.repoPath)
+		cmd := m.refreshWorkspace(msg.repoPath)
 		m.beginWorktreePrompt(msg.repoPath, msg.repoName, msg.defaultBranch)
-		return m, nil
+		return m, cmd
 
 	case repoFetchedMsg:
 		if m.fetchingPath == msg.repoPath {
@@ -269,8 +296,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.refreshWorkspace(msg.repoPath)
-		return m, nil
+		return m, m.refreshWorkspace(msg.repoPath)
 
 	case prListMsg:
 		if !m.pickingPR || m.prRepoPath != msg.repoPath {
@@ -292,8 +318,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.refreshWorkspace(msg.repoPath)
-		return m, m.openPath(msg.worktreePath, msg.sessionName, msg.branch)
+		cmd := m.refreshWorkspace(msg.repoPath)
+		return m, tea.Batch(cmd, m.openPath(msg.worktreePath, msg.sessionName, msg.branch))
+
+	case worktreeStatusMsg:
+		m.applyWorktreeStatus(msg)
+		return m, nil
 
 	case spinnerTickMsg:
 		if m.fetchingPath == "" && !m.prLoading {
@@ -926,8 +956,10 @@ func spinnerTick() tea.Cmd {
 // refreshWorkspace re-detects the workspace at path (branch + worktree list)
 // after an external change, preserving known tmux session state, then
 // expands it so the change is immediately visible. If path isn't already
-// known (e.g. a freshly cloned repo), it's appended.
-func (m *Model) refreshWorkspace(path string) {
+// known (e.g. a freshly cloned repo), it's appended. The returned tea.Cmd
+// re-fetches status (dirty/merged/pushed/last-commit) for the rescanned
+// worktrees, since Rescan itself only returns the cheap structural info.
+func (m *Model) refreshWorkspace(path string) tea.Cmd {
 	for i := range m.all {
 		if m.all[i].Path != path {
 			continue
@@ -949,13 +981,39 @@ func (m *Model) refreshWorkspace(path string) {
 		m.expanded[path] = true
 		m.refilter()
 		m.selectWorkspace(path)
-		return
+		return annotateWorktreesCmd(fresh)
 	}
 
-	m.all = append(m.all, scanner.Rescan(path))
+	fresh := scanner.Rescan(path)
+	m.all = append(m.all, fresh)
 	m.expanded[path] = true
 	m.refilter()
 	m.selectWorkspace(path)
+	return annotateWorktreesCmd(fresh)
+}
+
+// applyWorktreeStatus patches in a background-fetched status result for a
+// single worktree, then refilters so the change (and any icons it affects)
+// is picked up by the next render.
+func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
+	for i := range m.all {
+		if m.all[i].Path != msg.repoPath {
+			continue
+		}
+		for j := range m.all[i].Worktrees {
+			if m.all[i].Worktrees[j].Path != msg.worktreePath {
+				continue
+			}
+			wt := &m.all[i].Worktrees[j]
+			wt.Dirty = msg.status.Dirty
+			wt.MergedLocal = msg.status.MergedLocal
+			wt.PushedRemote = msg.status.PushedRemote
+			wt.LastCommit = msg.status.LastCommit
+			break
+		}
+		break
+	}
+	m.refilter()
 }
 
 // selectWorkspace moves the cursor to the top-level entry for path, if present.
