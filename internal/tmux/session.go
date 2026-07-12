@@ -11,6 +11,32 @@ import (
 
 var nonAlnum = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
+// hasClaudeHistory reports whether Claude Code has a recorded conversation
+// for dir, by checking for its project transcript directory under
+// ~/.claude/projects. Claude names that directory by replacing every
+// non-alphanumeric character in the absolute path with '-'.
+func hasClaudeHistory(dir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	name := nonAlnum.ReplaceAllString(abs, "-")
+	entries, err := os.ReadDir(filepath.Join(home, ".claude", "projects", name))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			return true
+		}
+	}
+	return false
+}
+
 // SessionName derives a tmux session name from a directory path.
 func SessionName(prefix, path string) string {
 	return sanitize(prefix, filepath.Base(path))
@@ -38,9 +64,10 @@ func sanitize(prefix, s string) string {
 // conversation in the current directory") so that a freshly created tmux
 // session — e.g. after a reboot killed the tmux server and gwn recreates the
 // session from scratch — resumes that worktree's last conversation instead
-// of starting blank. It's a no-op when there's no prior conversation, so
-// this is safe on genuinely new workspaces too.
-func assistantCmd(assistant string) string {
+// of starting blank. Claude errors out with "No conversation found to
+// continue" if -c is passed with no prior history, so it's only appended
+// when dir already has a recorded conversation.
+func assistantCmd(assistant, dir string) string {
 	fields := strings.Fields(assistant)
 	if len(fields) == 0 || fields[0] != "claude" {
 		return assistant
@@ -49,6 +76,9 @@ func assistantCmd(assistant string) string {
 		if f == "-c" || f == "--continue" || f == "-r" || f == "--resume" {
 			return assistant
 		}
+	}
+	if !hasClaudeHistory(dir) {
+		return assistant
 	}
 	return assistant + " -c"
 }
@@ -83,7 +113,7 @@ func OpenWorkspace(session, dir, editor, assistant, extraWindowName, extraWindow
 // (like a bubbletea Program) is reading os.Stdin. Only the returned attach
 // command needs exclusive access to the terminal.
 func PrepareOpen(session, dir, editor, assistant, extraWindowName, extraWindowCmd string) (*exec.Cmd, error) {
-	assistant = assistantCmd(assistant)
+	assistant = assistantCmd(assistant, dir)
 
 	if HasSession(session) {
 		if InsideTmux() {
