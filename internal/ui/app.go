@@ -581,14 +581,27 @@ func (m Model) renderItem(i int) string {
 		// Plain text body first, coloured parts appended outside the style render
 		// to avoid ANSI codes inside a Width-constrained Render call.
 		body := "   " + wt.Branch
+		status := ""
+		if wt.Dirty {
+			status += styleDirty.Render(" " + iconDirty)
+		}
+		if wt.MergedLocal {
+			status += styleMerged.Render(" " + iconMerged)
+		}
+		if wt.PushedRemote {
+			status += stylePushed.Render(" " + iconPushed)
+		}
+		if !wt.LastCommit.IsZero() {
+			status += styleLastCommit.Render(" " + humanizeSince(wt.LastCommit))
+		}
 		dot := styleSessionNone.Render(" " + iconDot)
 		if wt.HasSession {
 			dot = styleSessionActive.Render(" " + iconDot)
 		}
 		if selected {
-			return styleWorktreeSelected.Render(body) + dot
+			return styleWorktreeSelected.Render(body) + status + dot
 		}
-		return styleWorktreeItem.Render(body) + dot
+		return styleWorktreeItem.Render(body) + status + dot
 	}
 
 	icon := m.icon(ws.Type == scanner.TypeGitRepo)
@@ -666,6 +679,25 @@ func (m Model) renderPRList() string {
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// humanizeSince renders t as a short relative age, e.g. "2h ago", "3d ago".
+func humanizeSince(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	case d < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
+	default:
+		return fmt.Sprintf("%dy ago", int(d.Hours()/(24*365)))
+	}
 }
 
 func (m Model) icon(isGit bool) string {

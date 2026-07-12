@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 )
@@ -40,6 +42,14 @@ type WorktreeInfo struct {
 	Branch      string
 	TmuxSession string
 	HasSession  bool
+	// Dirty is true if the worktree has uncommitted changes (tracked or untracked).
+	Dirty bool
+	// MergedLocal is true if HEAD is an ancestor of the repo's local main/master branch.
+	MergedLocal bool
+	// PushedRemote is true if HEAD has reached origin/<branch>.
+	PushedRemote bool
+	// LastCommit is the commit time of HEAD, used as a "last worked on" signal.
+	LastCommit time.Time
 }
 
 // Rescan re-detects a single workspace at path, refreshing its branch and
@@ -424,5 +434,77 @@ func listWorktrees(repoPath string) []WorktreeInfo {
 	}
 	flush()
 
+	var wg sync.WaitGroup
+	for i := range worktrees {
+		wg.Add(1)
+		go func(wt *WorktreeInfo) {
+			defer wg.Done()
+			annotateWorktree(wt)
+		}(&worktrees[i])
+	}
+	wg.Wait()
+
 	return worktrees
+}
+
+// annotateWorktree fills in the status fields (dirty, merged, pushed, last
+// commit) for a single worktree via a handful of git subprocess calls
+// against its own path — this works for linked worktrees too, since git
+// resolves refs against the shared repo regardless of which worktree's
+// directory the command runs from.
+func annotateWorktree(wt *WorktreeInfo) {
+	wt.Dirty = hasUncommittedChanges(wt.Path)
+	wt.LastCommit = lastCommitTime(wt.Path)
+	wt.MergedLocal = isMergedToLocalMain(wt.Path)
+	wt.PushedRemote = isPushedToRemote(wt.Path, wt.Branch)
+}
+
+func hasUncommittedChanges(path string) bool {
+	out, err := exec.Command("git", "-C", path, "status", "--porcelain").Output()
+	if err != nil {
+		return false
+	}
+	return len(bytes.TrimSpace(out)) > 0
+}
+
+func lastCommitTime(path string) time.Time {
+	out, err := exec.Command("git", "-C", path, "log", "-1", "--format=%cI").Output()
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// localMainBranch returns whichever of "main"/"master" exists locally, so
+// isMergedToLocalMain has something to compare HEAD against.
+func localMainBranch(path string) string {
+	for _, name := range []string{"main", "master"} {
+		if refExists(path, "refs/heads/"+name) {
+			return name
+		}
+	}
+	return ""
+}
+
+func isMergedToLocalMain(path string) bool {
+	main := localMainBranch(path)
+	if main == "" {
+		return false
+	}
+	return exec.Command("git", "-C", path, "merge-base", "--is-ancestor", "HEAD", main).Run() == nil
+}
+
+func isPushedToRemote(path, branch string) bool {
+	if branch == "" || branch == "HEAD (detached)" {
+		return false
+	}
+	remoteRef := "refs/remotes/origin/" + branch
+	if !refExists(path, remoteRef) {
+		return false
+	}
+	return exec.Command("git", "-C", path, "merge-base", "--is-ancestor", "HEAD", remoteRef).Run() == nil
 }

@@ -55,6 +55,18 @@ var (
 				Foreground(colSubtext).
 				PaddingLeft(3)
 
+	styleDirty = lipgloss.NewStyle().
+			Foreground(colYellow)
+
+	styleMerged = lipgloss.NewStyle().
+			Foreground(colGreen)
+
+	stylePushed = lipgloss.NewStyle().
+			Foreground(colBlue)
+
+	styleLastCommit = lipgloss.NewStyle().
+			Foreground(colOverlay)
+
 	styleHints = lipgloss.NewStyle().
 			Foreground(colOverlay).
 			PaddingLeft(1)
@@ -74,6 +86,9 @@ const (
 	iconDir      = " "
 	iconWorktree = " "
 	iconDot      = "●"
+	iconDirty    = "*"
+	iconMerged   = "✓"
+	iconPushed   = "↑"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
