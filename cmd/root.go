@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/augtheo/gwn/internal/config"
@@ -41,6 +42,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	workspaces := scanner.Scan(cfg.ScanPaths, cfg.ScanDepth)
 	reconcile(workspaces, st)
 	sortByMRU(workspaces, st)
+	workspaces = moveCurrentFirst(workspaces)
 
 	if cfg.AutoAttachSingle && len(workspaces) == 1 {
 		ws := workspaces[0]
@@ -78,6 +80,57 @@ func reconcile(workspaces []scanner.Workspace, st *state.State) {
 			}
 		}
 	}
+}
+
+// moveCurrentFirst reorders workspaces so the one gwn was launched from (e.g.
+// the current tmux session's worktree) is listed first, regardless of MRU
+// order. It matches by cwd: first against top-level workspace paths, then —
+// for bare-repo layouts where worktrees live in nested subdirectories — the
+// parent workspace containing the current worktree.
+func moveCurrentFirst(workspaces []scanner.Workspace) []scanner.Workspace {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return workspaces
+	}
+	cwd = resolveSymlinks(cwd)
+
+	idx := -1
+	for i, ws := range workspaces {
+		if resolveSymlinks(ws.Path) == cwd {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		for i, ws := range workspaces {
+			for _, wt := range ws.Worktrees {
+				if resolveSymlinks(wt.Path) == cwd {
+					idx = i
+					break
+				}
+			}
+			if idx != -1 {
+				break
+			}
+		}
+	}
+
+	if idx <= 0 {
+		return workspaces
+	}
+
+	reordered := make([]scanner.Workspace, 0, len(workspaces))
+	reordered = append(reordered, workspaces[idx])
+	reordered = append(reordered, workspaces[:idx]...)
+	reordered = append(reordered, workspaces[idx+1:]...)
+	return reordered
+}
+
+func resolveSymlinks(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 func sortByMRU(workspaces []scanner.Workspace, st *state.State) {
