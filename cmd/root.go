@@ -39,6 +39,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("state: %w", err)
 	}
 
+	if pruneOrphaned(st) {
+		_ = st.Save()
+	}
+
 	workspaces := scanner.Scan(cfg.ScanPaths, cfg.ScanDepth)
 	reconcile(workspaces, st)
 	sortByMRU(workspaces, st)
@@ -54,6 +58,31 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+// pruneOrphaned reaps state entries whose path no longer exists on disk —
+// e.g. a worktree deleted through lazygit or a plain `git worktree remove`,
+// which gwn's own UI never sees. Any live tmux session tied to that path is
+// killed before the entry is dropped. Reports whether state was changed.
+func pruneOrphaned(st *state.State) bool {
+	sessions, _ := tmux.ListSessions()
+	active := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		active[s] = true
+	}
+
+	changed := false
+	for path, ws := range st.Workspaces {
+		if _, err := os.Stat(path); err == nil {
+			continue
+		}
+		if ws.TmuxSession != "" && active[ws.TmuxSession] {
+			_ = tmux.KillSession(ws.TmuxSession)
+		}
+		st.Remove(path)
+		changed = true
+	}
+	return changed
 }
 
 func reconcile(workspaces []scanner.Workspace, st *state.State) {
