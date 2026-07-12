@@ -33,6 +33,26 @@ func sanitize(prefix, s string) string {
 	return name
 }
 
+// assistantCmd adjusts the configured assistant command for the "ai"
+// window. For Claude Code, it appends -c ("continue the most recent
+// conversation in the current directory") so that a freshly created tmux
+// session — e.g. after a reboot killed the tmux server and gwn recreates the
+// session from scratch — resumes that worktree's last conversation instead
+// of starting blank. It's a no-op when there's no prior conversation, so
+// this is safe on genuinely new workspaces too.
+func assistantCmd(assistant string) string {
+	fields := strings.Fields(assistant)
+	if len(fields) == 0 || fields[0] != "claude" {
+		return assistant
+	}
+	for _, f := range fields[1:] {
+		if f == "-c" || f == "--continue" || f == "-r" || f == "--resume" {
+			return assistant
+		}
+	}
+	return assistant + " -c"
+}
+
 // OpenWorkspace sets up (or reattaches) a tmux session and blocks until the
 // attached client detaches. Only safe to call when nothing else is reading
 // os.Stdin — for callers running inside a bubbletea Program, use PrepareOpen
@@ -63,6 +83,8 @@ func OpenWorkspace(session, dir, editor, assistant, extraWindowName, extraWindow
 // (like a bubbletea Program) is reading os.Stdin. Only the returned attach
 // command needs exclusive access to the terminal.
 func PrepareOpen(session, dir, editor, assistant, extraWindowName, extraWindowCmd string) (*exec.Cmd, error) {
+	assistant = assistantCmd(assistant)
+
 	if HasSession(session) {
 		if InsideTmux() {
 			return nil, SwitchClient(session)
