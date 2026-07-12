@@ -133,6 +133,11 @@ func bareGitDir(path string) (string, bool) {
 // HEAD. If repoPath uses the <repo>/.bare layout, the worktree is nested at
 // <repoPath>/<branch>; otherwise it's a sibling directory named
 // <repo>-<branch>. It returns the new worktree's path.
+//
+// If a worktree for branch already exists at the expected destination (e.g. a
+// PR reviewed earlier via FetchPR), AddWorktree is idempotent and just
+// returns its path rather than erroring — this lets callers like Ctrl+R and
+// `gwn review` reattach instead of failing on repeat invocations.
 func AddWorktree(repoPath, branch string) (string, error) {
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
@@ -149,6 +154,11 @@ func AddWorktree(repoPath, branch string) (string, error) {
 	}
 
 	if _, err := os.Stat(dest); err == nil {
+		for _, wt := range listWorktrees(gitDir) {
+			if wt.Branch == branch && samePath(wt.Path, dest) {
+				return dest, nil
+			}
+		}
 		return "", fmt.Errorf("%s already exists", dest)
 	}
 
@@ -212,6 +222,19 @@ func RemoveWorkspace(ws Workspace) error {
 		return fmt.Errorf("remove %s: %w", ws.Path, err)
 	}
 	return nil
+}
+
+// samePath reports whether a and b refer to the same location, resolving
+// symlinks (e.g. macOS's /tmp -> /private/tmp) when possible so paths built
+// independently (git's worktree list output vs. a freshly Join'd dest) still
+// compare equal.
+func samePath(a, b string) bool {
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA == nil && errB == nil {
+		return ra == rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func refExists(gitDir, ref string) bool {
@@ -299,6 +322,12 @@ func ListOpenPRs(repoPath string) ([]PRInfo, error) {
 // FetchPR fetches PR number n's head ref from origin into a local branch
 // named "pr-<n>", so AddWorktree can create a worktree for it exactly like
 // any other branch — it just sees a ref under refs/heads/.
+//
+// If pr-<n> is already checked out in a worktree, the fetch is skipped
+// entirely rather than attempted: git refuses to force-update a branch
+// that's checked out elsewhere, and re-fetching isn't needed for AddWorktree
+// to reattach to it. This makes re-reviewing the same PR idempotent instead
+// of erroring.
 func FetchPR(repoPath string, n int) (branch string, err error) {
 	gitDir := repoPath
 	if dir, ok := bareGitDir(repoPath); ok {
@@ -306,12 +335,34 @@ func FetchPR(repoPath string, n int) (branch string, err error) {
 	}
 
 	branch = fmt.Sprintf("pr-%d", n)
+
+	for _, wt := range listWorktrees(gitDir) {
+		if wt.Branch == branch {
+			return branch, nil
+		}
+	}
+
 	refspec := fmt.Sprintf("pull/%d/head:%s", n, branch)
 	out, err := exec.Command("git", "-C", gitDir, "fetch", "origin", refspec, "--force").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git fetch %s: %s", refspec, cleanGitOutput(out, err))
 	}
 	return branch, nil
+}
+
+var prBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
+
+// ReviewWindow reports the extra tmux window a PR worktree's branch should
+// get: name "diff" running reviewCmd with "{pr}" substituted for the PR
+// number, derived from the "pr-<n>" naming convention FetchPR creates. Both
+// return values are "" for a non-PR branch, meaning "no extra window" — the
+// same convention tmux.PrepareOpen already uses.
+func ReviewWindow(branch, reviewCmd string) (name, cmd string) {
+	match := prBranchPattern.FindStringSubmatch(branch)
+	if match == nil {
+		return "", ""
+	}
+	return "diff", strings.ReplaceAll(reviewCmd, "{pr}", match[1])
 }
 
 func cleanGitOutput(out []byte, err error) string {

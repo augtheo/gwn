@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -63,10 +62,6 @@ type worktreeStatusMsg struct {
 	worktreePath string
 	status       scanner.WorktreeStatus
 }
-
-// prBranchPattern recognizes the local branch names FetchPR creates
-// ("pr-<n>"), so openPath knows to add a "diff" review window.
-var prBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
 
 type mode int
 
@@ -1505,11 +1500,7 @@ func (m Model) openSelected() tea.Cmd {
 // matches the "pr-<n>" convention FetchPR creates, an extra "diff" window is
 // added running cfg.ReviewCommand for that PR number.
 func (m Model) openPath(dir, sessionName, branch string) tea.Cmd {
-	extraName, extraCmd := "", ""
-	if match := prBranchPattern.FindStringSubmatch(branch); match != nil {
-		extraName = "diff"
-		extraCmd = strings.ReplaceAll(m.cfg.ReviewCommand, "{pr}", match[1])
-	}
+	extraName, extraCmd := scanner.ReviewWindow(branch, m.cfg.ReviewCommand)
 
 	cfg := m.cfg
 	st := m.st

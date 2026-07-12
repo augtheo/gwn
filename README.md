@@ -41,7 +41,7 @@ A terminal workspace navigator. Scans configured project directories, detects gi
 - A Nerd Font (for icons — optional, configurable)
 - `git` in PATH (for worktree listing, and `git clone`/`fetch` if you use `Ctrl+G`/`Ctrl+F`)
 - `gh` (GitHub CLI, authenticated) in PATH if you use `Ctrl+R` to review PRs
-- [`delta`](https://github.com/dandavison/delta) in PATH for the default `review_command`'s syntax-highlighted, side-by-side diffs (optional — swap `review_command` for `gh pr diff {pr} | less -R` if you'd rather not install it)
+- [`hunk`](https://github.com/modem-dev/hunk) in PATH for the default `review_command`'s diff viewer, which also supports inline review comments (optional — swap `review_command` for `gh pr diff {pr} | less -R` if you'd rather not install it)
 
 ## Installation
 
@@ -97,7 +97,7 @@ nerd_font_icons   = true  # set false if your terminal doesn't have Nerd Fonts
 vim_mode          = true  # start in modal Normal mode; false = classic always-typing search
 default_git_host  = "github.com" # host assumed for "owner/repo" shorthand with Ctrl+G
 clone_protocol    = "https"      # "https" or "ssh" — used to build the clone URL for shorthand forms
-review_command    = "gh pr diff {pr} | delta --side-by-side --paging=always" # run in the "diff" window after Ctrl+R checkout; {pr} is the PR number
+review_command    = "gh pr diff {pr} | hunk patch" # run in the "diff" window after Ctrl+R checkout; {pr} is the PR number
 
 # Auto-prefix new branch names (Ctrl+W) for repos under a given path.
 # Matched by longest path prefix; repos outside all of these get no prefix.
@@ -215,11 +215,11 @@ This bare + worktree layout is the recommended way to work with a repo in `gwn`:
 
 1. `gwn` fetches the repo's open PRs via `gh pr list` and shows a picker (number, title, author). Type to fuzzy-filter, `↑`/`↓` to move.
 2. `Enter` on a PR fetches its head ref (`git fetch origin pull/<n>/head:pr-<n>`) and creates a worktree for it — same underlying mechanism as `Ctrl+W`, just skipping the branch-name prompt.
-3. The tmux session opens automatically with a fourth window, `diff`, running `review_command` (default `gh pr diff <n> | delta --side-by-side --paging=always`) for a syntax-highlighted, side-by-side view of the diff.
+3. The tmux session opens automatically with a fourth window, `diff`, running `review_command` (default `gh pr diff <n> | hunk patch`), a live [`hunk`](https://github.com/modem-dev/hunk) review session for that diff.
 
 From there:
 - Use the `ai` window's assistant to review — e.g. Claude Code's `review` skill.
-- For leaving inline comments, use a tool with real PR support in the terminal, like [`octo.nvim`](https://github.com/pwntester/octo.nvim) in the `editor` window, or `gh pr review`/`gh pr comment` from a shell.
+- Leave inline comments directly in the `diff` window's `hunk` session as you scroll. Claude Code's bundled `hunk-review` skill can also drive that same live session from the `ai` window (`hunk session review`, `navigate`, `comment add`) to narrate the diff and leave notes for you as you watch — since `gh pr diff | hunk patch` starts a stdin-patch session with no associated repo, session selection auto-resolves (it's the only session for that worktree) or falls back to `hunk session list --json` to find it by `sessionId`/`cwd`.
 
 ## How sessions work
 
@@ -244,3 +244,28 @@ gwn open ~/projects/augtheo/myapp
 ```
 
 This creates the session if it doesn't exist and switches to it, then exits.
+
+Similarly, `gwn review <path> <pr-number>` runs the `Ctrl+R` checkout-and-open flow non-interactively, for binding into other tools:
+
+```bash
+gwn review ~/projects/work/cli 13824
+```
+
+`<path>` is the same bare-repo container path gwn already scans (i.e. `ws.Path`, not a worktree path). Re-running it on a PR that's already checked out just reattaches to the existing worktree/session instead of erroring.
+
+### `gh-dash` integration
+
+[`gh-dash`](https://github.com/dlvhdr/gh-dash) is a good fit for *finding* PRs to review, with `gwn review` handling the checkout. In `gh-dash`'s config, map each tracked repo's `repoPaths` entry to the same path gwn scans, then bind a key to `gwn review`:
+
+```yaml
+repoPaths:
+  "your-org/cli": "~/projects/work/cli"
+
+keybindings:
+  prs:
+    - key: R
+      name: gwn review
+      command: gwn review {{.RepoPath}} {{.PrNumber}}
+```
+
+`gh-dash` shells out and hands over the terminal for the duration of the command (the same way its own `lazygit` binding example works), so this behaves like any other foreground tmux attach.

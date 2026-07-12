@@ -114,7 +114,7 @@ func defaults() *Config {
 		VimMode:          true,
 		DefaultGitHost:   "github.com",
 		CloneProtocol:    "https",
-		ReviewCommand:    "gh pr diff {pr} | delta --side-by-side --paging=always",
+		ReviewCommand:    "gh pr diff {pr} | hunk patch",
 		Appearance:       Appearance{Theme: "mocha"},
 	}
 }
