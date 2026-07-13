@@ -135,6 +135,11 @@ func PrepareOpen(session, dir, editor, assistant, extraWindowName, extraWindowCm
 	if err := NewWindow(session, "ai", dir); err != nil {
 		return nil, err
 	}
+	// Claude Code sets the terminal title to a chat summary; without this,
+	// tmux's automatic-rename would overwrite the "ai" window name with it.
+	if err := DisableAutomaticRename(session, "ai"); err != nil {
+		return nil, err
+	}
 	if extraWindowName != "" {
 		if err := NewWindow(session, extraWindowName, dir); err != nil {
 			return nil, err
