@@ -82,9 +82,9 @@ var (
 )
 
 const (
-	iconGit      = " "
-	iconDir      = " "
-	iconWorktree = " "
+	iconGit      = ""
+	iconDir      = ""
+	iconWorktree = ""
 	iconDot      = "●"
 	iconDirty    = "*"
 	iconMerged   = "✓"

@@ -604,7 +604,7 @@ func (m Model) renderItem(i int) string {
 		return styleWorktreeItem.Render(body) + status + dot
 	}
 
-	icon := m.icon(ws.Type == scanner.TypeGitRepo)
+	icon := m.icon(ws)
 
 	expandHint := ""
 	if canExpand(ws) {
@@ -700,17 +700,23 @@ func humanizeSince(t time.Time) string {
 	}
 }
 
-func (m Model) icon(isGit bool) string {
-	if !m.cfg.NerdFontIcons {
-		if isGit {
-			return "git "
+func (m Model) icon(ws scanner.Workspace) string {
+	if ws.Type != scanner.TypeGitRepo {
+		if !m.cfg.NerdFontIcons {
+			return "dir "
 		}
-		return "dir "
+		return iconDir + " "
 	}
-	if isGit {
-		return iconGit + " "
+	if ws.IsBare {
+		if !m.cfg.NerdFontIcons {
+			return "bare "
+		}
+		return iconWorktree + " "
 	}
-	return iconDir + " "
+	if !m.cfg.NerdFontIcons {
+		return "git "
+	}
+	return iconGit + " "
 }
 
 func (m *Model) toggleExpand() {
