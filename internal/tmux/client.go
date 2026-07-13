@@ -29,6 +29,14 @@ func NewWindow(session, name, dir string) error {
 	return exec.Command("tmux", "new-window", "-t", session, "-n", name, "-c", dir).Run()
 }
 
+// DisableAutomaticRename turns off tmux's automatic-rename for a window, so
+// programs running inside it (e.g. Claude Code setting the terminal title to
+// a chat summary) can't override the name we gave it.
+func DisableAutomaticRename(session, window string) error {
+	target := session + ":" + window
+	return exec.Command("tmux", "set-window-option", "-t", target, "automatic-rename", "off").Run()
+}
+
 // SendKeysToWindow sends keys to a window identified by name, not index.
 func SendKeysToWindow(session, window, keys string) error {
 	target := session + ":" + window
