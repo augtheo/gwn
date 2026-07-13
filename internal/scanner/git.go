@@ -17,8 +17,8 @@ import (
 type WorkspaceType string
 
 const (
-	TypePlain   WorkspaceType = "plain"
-	TypeGitRepo WorkspaceType = "git_repo"
+	TypePlain    WorkspaceType = "plain"
+	TypeGitRepo  WorkspaceType = "git_repo"
 	TypeWorktree WorkspaceType = "worktree"
 )
 
@@ -130,6 +130,34 @@ func RemoveWorktree(repoPath, worktreePath string) error {
 	out, err := exec.Command("git", "-C", gitDir, "worktree", "remove", worktreePath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git worktree remove: %s", cleanGitOutput(out, err))
+	}
+	return nil
+}
+
+// RemoveWorkspace deletes an entire workspace from disk: its whole directory,
+// not just one linked worktree. For a git repo, any linked worktrees are
+// force-removed first (they may live outside ws.Path, e.g. the non-bare
+// "<repo>-<branch>" sibling layout, so they'd otherwise be left orphaned
+// pointing at a .git that no longer exists); ws.Path itself is then removed
+// with the rest (bare container, or the repo's own working tree). Callers
+// are expected to have already surfaced any dirty/unpushed worktrees to the
+// user for confirmation, since this proceeds regardless.
+func RemoveWorkspace(ws Workspace) error {
+	for _, wt := range ws.Worktrees {
+		if wt.Path == ws.Path {
+			continue // the main worktree is removed along with ws.Path itself
+		}
+		gitDir := ws.Path
+		if dir, ok := bareGitDir(ws.Path); ok {
+			gitDir = dir
+		}
+		out, err := exec.Command("git", "-C", gitDir, "worktree", "remove", "--force", wt.Path).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git worktree remove --force %s: %s", wt.Path, cleanGitOutput(out, err))
+		}
+	}
+	if err := os.RemoveAll(ws.Path); err != nil {
+		return fmt.Errorf("remove %s: %w", ws.Path, err)
 	}
 	return nil
 }

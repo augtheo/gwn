@@ -35,9 +35,15 @@ type repoFetchedMsg struct {
 	repoPath string
 	err      error
 }
-type worktreeDeletedMsg struct {
-	repoPath string
-	err      error
+
+// bulkDeletedMsg reports the outcome of executeDelete: which repos need
+// their worktree list refreshed (worktree-kind targets), and which
+// workspace paths no longer exist on disk at all (workspace-kind targets,
+// to be dropped from the list rather than rescanned).
+type bulkDeletedMsg struct {
+	errs             []error
+	refreshRepoPaths []string
+	removedPaths     []string
 }
 type prListMsg struct {
 	repoPath string
@@ -67,6 +73,7 @@ type mode int
 const (
 	modeNormal mode = iota
 	modeInsert
+	modeVisual
 )
 
 type Model struct {
@@ -84,22 +91,20 @@ type Model struct {
 
 	mode         mode
 	pendingG     bool // "g" seen, waiting for a second "g" (gg = go to top)
+	pendingD     bool // "d" seen, waiting for a second "d" (dd = delete row)
 	pendingCount int  // numeric prefix accumulated so far, e.g. "5" in "5j"
+	visualAnchor int  // row index where visual mode ("V") was entered
 
 	creatingWorktree bool
 	createRepoPath   string
 
 	cloningRepo bool
 
-	confirmingDeleteWorktree bool
-	deleteRepoPath           string
-	deleteWorktreePath       string
-	deleteWorktreeLabel      string
-	deleteSessionName        string
-	deleteHasSession         bool
+	confirmingDelete bool
+	deleteTargets    []deleteTarget
 
-	fetchingPath string
-	spinnerFrame int
+	fetchingPaths map[string]bool
+	spinnerFrame  int
 
 	pickingPR  bool
 	prRepoPath string
@@ -115,6 +120,27 @@ type listItem struct {
 	parentIdx int // index in filtered of the parent repo (for worktrees)
 }
 
+type deleteKind int
+
+const (
+	deleteWorktreeKind deleteKind = iota
+	deleteWorkspaceKind
+)
+
+// deleteTarget describes one row queued for deletion, whether from a single
+// dd/Ctrl+X press or gathered from a visual-mode selection.
+type deleteTarget struct {
+	kind        deleteKind
+	repoPath    string // parent repo path (worktree kind), or the workspace's own path (workspace kind)
+	path        string // the worktree path, or the workspace path
+	label       string // display label: branch name, or workspace name
+	sessionName string
+	hasSession  bool
+	dirty       bool
+	unpushed    bool
+	ws          scanner.Workspace // full workspace; only populated/used for workspace kind
+}
+
 func New(cfg *config.Config, st *state.State, workspaces []scanner.Workspace) Model {
 	ti := textinput.New()
 	ti.Placeholder = "search workspaces..."
@@ -124,12 +150,13 @@ func New(cfg *config.Config, st *state.State, workspaces []scanner.Workspace) Mo
 	ti.TextStyle = lipgloss.NewStyle().Foreground(colText)
 
 	m := Model{
-		cfg:      cfg,
-		st:       st,
-		all:      workspaces,
-		input:    ti,
-		expanded: make(map[string]bool),
-		mode:     modeInsert,
+		cfg:           cfg,
+		st:            st,
+		all:           workspaces,
+		input:         ti,
+		expanded:      make(map[string]bool),
+		mode:          modeInsert,
+		fetchingPaths: make(map[string]bool),
 	}
 	if cfg.VimMode {
 		m.mode = modeNormal
@@ -208,15 +235,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if m.confirmingDeleteWorktree {
+		if m.confirmingDelete {
 			switch msg.String() {
 			case "y", "enter":
-				repoPath, worktreePath := m.deleteRepoPath, m.deleteWorktreePath
-				sessionName, hasSession := m.deleteSessionName, m.deleteHasSession
-				m.cancelDeleteWorktree()
-				return m, m.deleteWorktree(repoPath, worktreePath, sessionName, hasSession)
+				targets := m.deleteTargets
+				m.cancelDelete()
+				return m, m.executeDelete(targets)
 			default:
-				m.cancelDeleteWorktree()
+				m.cancelDelete()
 				return m, nil
 			}
 		}
@@ -243,6 +269,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.startCloneRepo()
 			return m, nil
 		case "ctrl+f":
+			if m.mode == modeVisual {
+				return m, m.startFetchVisualSelection()
+			}
 			return m, m.startFetch()
 		case "ctrl+x":
 			m.startDeleteWorktree()
@@ -251,6 +280,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.startPickPR()
 		}
 
+		if m.cfg.VimMode && m.mode == modeVisual {
+			return m.updateVisualMode(msg)
+		}
 		if m.cfg.VimMode && m.mode == modeNormal {
 			return m.updateNormalMode(msg)
 		}
@@ -284,19 +316,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case repoFetchedMsg:
-		if m.fetchingPath == msg.repoPath {
-			m.fetchingPath = ""
-		}
+		delete(m.fetchingPaths, msg.repoPath)
 		m.err = msg.err
 		return m, nil
 
-	case worktreeDeletedMsg:
-		if msg.err != nil {
-			m.err = msg.err
-			return m, nil
+	case bulkDeletedMsg:
+		m.err = joinErrs(msg.errs)
+		for _, p := range msg.removedPaths {
+			m.removeWorkspace(p)
 		}
-		m.err = nil
-		return m, m.refreshWorkspace(msg.repoPath)
+		seen := make(map[string]bool)
+		var cmds []tea.Cmd
+		for _, p := range msg.refreshRepoPaths {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			cmds = append(cmds, m.refreshWorkspace(p))
+		}
+		return m, tea.Batch(cmds...)
 
 	case prListMsg:
 		if !m.pickingPR || m.prRepoPath != msg.repoPath {
@@ -326,7 +364,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		if m.fetchingPath == "" && !m.prLoading {
+		if len(m.fetchingPaths) == 0 && !m.prLoading {
 			return m, nil
 		}
 		m.spinnerFrame++
@@ -401,6 +439,7 @@ func (m Model) updateNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if d != 0 || m.pendingCount > 0 {
 			m.pendingCount = m.pendingCount*10 + d
 			m.pendingG = false
+			m.pendingD = false
 			return m, nil
 		}
 	}
@@ -411,6 +450,14 @@ func (m Model) updateNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		count = 1
 	}
 	m.pendingCount = 0
+
+	if m.pendingD {
+		m.pendingD = false
+		if key == "d" {
+			m.startDeleteSelected()
+		}
+		return m, nil
+	}
 
 	if m.pendingG {
 		m.pendingG = false
@@ -459,6 +506,13 @@ func (m Model) updateNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		m.pendingG = true
 		return m, nil
+	case "d":
+		m.pendingD = true
+		return m, nil
+	case "V":
+		m.mode = modeVisual
+		m.visualAnchor = m.cursor
+		return m, nil
 	case "G":
 		if hadCount {
 			m.cursor = clampIndex(count-1, len(m.filtered))
@@ -477,6 +531,62 @@ func (m Model) updateNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// updateVisualMode handles keys while a row range is selected via "V" (vim
+// visual-line mode): motions extend the selection, "d" deletes every
+// selected row, ctrl+f (handled earlier, as a global chord) fetches every
+// selected repo, and esc/V/q leave visual mode without acting.
+func (m Model) updateVisualMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	if m.pendingG {
+		m.pendingG = false
+		if key == "g" {
+			m.cursor = clampIndex(0, len(m.filtered))
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "esc", "V", "q":
+		m.mode = modeNormal
+		return m, nil
+	case "j", "down", "ctrl+n", "ctrl+j":
+		m.moveCursor(1)
+		return m, nil
+	case "k", "up", "ctrl+p", "ctrl+k":
+		m.moveCursor(-1)
+		return m, nil
+	case "g":
+		m.pendingG = true
+		return m, nil
+	case "G":
+		if len(m.filtered) > 0 {
+			m.cursor = len(m.filtered) - 1
+		}
+		return m, nil
+	case "ctrl+d":
+		m.moveCursor(m.halfPage())
+		return m, nil
+	case "ctrl+u":
+		m.moveCursor(-m.halfPage())
+		return m, nil
+	case "d":
+		m.startDeleteVisualSelection()
+		return m, nil
+	}
+	return m, nil
+}
+
+// visualSelectionRange returns the [lo, hi] inclusive row indices currently
+// spanned by visual mode, ordered regardless of which end the cursor is on.
+func (m Model) visualSelectionRange() (int, int) {
+	lo, hi := m.visualAnchor, m.cursor
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	return lo, hi
 }
 
 func (m *Model) moveCursor(delta int) {
@@ -560,18 +670,16 @@ func (m Model) View() string {
 		b.WriteString(styleHints.Render("enter: create worktree  esc: cancel"))
 	case m.cloningRepo:
 		b.WriteString(styleHints.Render("enter: clone  esc: cancel"))
-	case m.confirmingDeleteWorktree:
-		sessionNote := ""
-		if m.deleteHasSession {
-			sessionNote = " + kill its tmux session"
-		}
-		b.WriteString(lipgloss.NewStyle().Foreground(colRed).Render("  delete worktree "+m.deleteWorktreeLabel+sessionNote+"? ") +
-			styleHints.Render("y: confirm  any other key: cancel"))
+	case m.confirmingDelete:
+		b.WriteString(m.renderDeleteConfirm())
 	case m.pickingPR:
 		b.WriteString(styleHints.Render("enter: checkout PR  esc: cancel"))
+	case m.cfg.VimMode && m.mode == modeVisual:
+		b.WriteString(lipgloss.NewStyle().Foreground(colMauve).Bold(true).Render(" VISUAL ") +
+			styleHints.Render(" j/k gg/G ^d/^u: extend  d: delete selected  ^f: fetch selected  esc/V: cancel"))
 	case m.cfg.VimMode && m.mode == modeNormal:
 		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
-			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: expand  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
 			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
@@ -604,6 +712,11 @@ func (m Model) halfPage() int {
 func (m Model) renderItem(i int) string {
 	item := m.filtered[i]
 	selected := i == m.cursor
+	inVisual := false
+	if m.cfg.VimMode && m.mode == modeVisual {
+		lo, hi := m.visualSelectionRange()
+		inVisual = i >= lo && i <= hi
+	}
 	ws := item.ws
 
 	if item.wtIdx >= 0 {
@@ -628,8 +741,11 @@ func (m Model) renderItem(i int) string {
 		if wt.HasSession {
 			dot = styleSessionActive.Render(" " + iconDot)
 		}
-		if selected {
+		switch {
+		case selected:
 			return styleWorktreeSelected.Render(body) + status + dot
+		case inVisual:
+			return styleWorktreeVisual.Render(body) + status + dot
 		}
 		return styleWorktreeItem.Render(body) + status + dot
 	}
@@ -657,18 +773,71 @@ func (m Model) renderItem(i int) string {
 	if ws.HasSession {
 		dot = styleSessionActive.Render(" " + iconDot)
 	}
-	if ws.Path == m.fetchingPath {
+	if m.fetchingPaths[ws.Path] {
 		dot = styleSpinner.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
 	}
 
-	if selected {
+	switch {
+	case selected:
 		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot)
 		if bodyWidth < lipgloss.Width(body) {
 			bodyWidth = lipgloss.Width(body)
 		}
 		return styleSelected.Width(bodyWidth).Render(body) + branch + dot
+	case inVisual:
+		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot)
+		if bodyWidth < lipgloss.Width(body) {
+			bodyWidth = lipgloss.Width(body)
+		}
+		return styleVisual.Width(bodyWidth).Render(body) + branch + dot
 	}
 	return styleNormal.Render(body) + branch + dot
+}
+
+// renderDeleteConfirm renders the confirmation prompt for m.deleteTargets: a
+// single-line summary for one target, or a listed breakdown (flagging dirty
+// or unpushed targets) when several are queued from a visual selection.
+func (m Model) renderDeleteConfirm() string {
+	warn := lipgloss.NewStyle().Foreground(colRed)
+
+	if len(m.deleteTargets) == 1 {
+		t := m.deleteTargets[0]
+		what := "worktree "
+		if t.kind == deleteWorkspaceKind {
+			what = "workspace "
+		}
+		return warn.Render("  delete "+what+t.label+deleteTargetNote(t)+"? ") +
+			styleHints.Render("y: confirm  any other key: cancel")
+	}
+
+	var b strings.Builder
+	b.WriteString(warn.Render(fmt.Sprintf("  delete %d selected:", len(m.deleteTargets))) + "\n")
+	for _, t := range m.deleteTargets {
+		kind := "worktree"
+		if t.kind == deleteWorkspaceKind {
+			kind = "workspace"
+		}
+		b.WriteString(warn.Render("    "+kind+" "+t.label+deleteTargetNote(t)) + "\n")
+	}
+	b.WriteString(styleHints.Render("y: confirm  any other key: cancel"))
+	return b.String()
+}
+
+// deleteTargetNote renders the inline warnings shown next to a queued
+// delete target: dirty/unpushed state, and whether a tmux session will also
+// be killed.
+func deleteTargetNote(t deleteTarget) string {
+	note := ""
+	if t.dirty {
+		note += " [dirty]"
+	}
+	if t.unpushed {
+		note += " [unpushed]"
+	}
+	if t.hasSession {
+		note += " +session"
+	}
+	return note
 }
 
 // renderPRList renders the Ctrl+R PR picker in place of the workspace list.
@@ -837,9 +1006,10 @@ func (m Model) createWorktree(repoPath, branch string) tea.Cmd {
 	}
 }
 
-// startDeleteWorktree arms the delete confirmation for the selected worktree.
-// Only linked worktrees (wtIdx >= 0) qualify — the main worktree/bare
-// container row is never deletable this way.
+// startDeleteWorktree arms the delete confirmation for the selected worktree
+// (Ctrl+X). Only linked worktrees (wtIdx >= 0) qualify — the main
+// worktree/bare container row is never deletable this way; use "dd" (via
+// startDeleteWorkspace) to delete a whole workspace.
 func (m *Model) startDeleteWorktree() {
 	if m.cursor >= len(m.filtered) {
 		return
@@ -848,37 +1018,192 @@ func (m *Model) startDeleteWorktree() {
 	if item.wtIdx < 0 {
 		return
 	}
-	wt := item.ws.Worktrees[item.wtIdx]
-	m.confirmingDeleteWorktree = true
-	m.deleteRepoPath = item.ws.Path
-	m.deleteWorktreePath = wt.Path
-	m.deleteWorktreeLabel = wt.Branch
-	m.deleteSessionName = wt.TmuxSession
-	m.deleteHasSession = wt.HasSession
+	m.confirmingDelete = true
+	m.deleteTargets = []deleteTarget{worktreeDeleteTarget(item.ws, item.wtIdx)}
 }
 
-func (m *Model) cancelDeleteWorktree() {
-	m.confirmingDeleteWorktree = false
-	m.deleteRepoPath = ""
-	m.deleteWorktreePath = ""
-	m.deleteWorktreeLabel = ""
-	m.deleteSessionName = ""
-	m.deleteHasSession = false
+// startDeleteWorkspace arms the delete confirmation for the selected row's
+// entire workspace directory (all worktrees + git history, or a plain
+// directory). Repo rows only (wtIdx == -1).
+func (m *Model) startDeleteWorkspace() {
+	if m.cursor >= len(m.filtered) {
+		return
+	}
+	item := m.filtered[m.cursor]
+	if item.wtIdx >= 0 {
+		return
+	}
+	m.confirmingDelete = true
+	m.deleteTargets = []deleteTarget{workspaceDeleteTarget(item.ws)}
 }
 
-func (m Model) deleteWorktree(repoPath, worktreePath, sessionName string, hasSession bool) tea.Cmd {
+// startDeleteSelected implements vim "dd": delete whatever's on the current
+// row — a linked worktree, or the whole workspace if the row is a repo.
+func (m *Model) startDeleteSelected() {
+	if m.cursor >= len(m.filtered) {
+		return
+	}
+	if m.filtered[m.cursor].wtIdx >= 0 {
+		m.startDeleteWorktree()
+		return
+	}
+	m.startDeleteWorkspace()
+}
+
+// startDeleteVisualSelection arms the delete confirmation for every row
+// spanned by visual mode, then returns to normal mode.
+func (m *Model) startDeleteVisualSelection() {
+	targets := m.deleteTargetsForVisualSelection()
+	m.mode = modeNormal
+	if len(targets) == 0 {
+		return
+	}
+	m.confirmingDelete = true
+	m.deleteTargets = targets
+}
+
+// deleteTargetsForVisualSelection builds one deleteTarget per row in the
+// visual selection, deduplicated so that a repo row selected alongside its
+// own worktree rows only produces a single whole-workspace target (deleting
+// the workspace already removes its worktrees).
+func (m Model) deleteTargetsForVisualSelection() []deleteTarget {
+	lo, hi := m.visualSelectionRange()
+
+	workspaceSelected := make(map[string]bool)
+	for i := lo; i <= hi && i < len(m.filtered); i++ {
+		item := m.filtered[i]
+		if item.wtIdx < 0 {
+			workspaceSelected[item.ws.Path] = true
+		}
+	}
+
+	var targets []deleteTarget
+	seenWorkspace := make(map[string]bool)
+	for i := lo; i <= hi && i < len(m.filtered); i++ {
+		item := m.filtered[i]
+		if item.wtIdx < 0 {
+			if seenWorkspace[item.ws.Path] {
+				continue
+			}
+			seenWorkspace[item.ws.Path] = true
+			targets = append(targets, workspaceDeleteTarget(item.ws))
+			continue
+		}
+		if workspaceSelected[item.ws.Path] {
+			continue // parent workspace target already covers this worktree
+		}
+		targets = append(targets, worktreeDeleteTarget(item.ws, item.wtIdx))
+	}
+	return targets
+}
+
+func worktreeDeleteTarget(ws scanner.Workspace, wtIdx int) deleteTarget {
+	wt := ws.Worktrees[wtIdx]
+	return deleteTarget{
+		kind:        deleteWorktreeKind,
+		repoPath:    ws.Path,
+		path:        wt.Path,
+		label:       wt.Branch,
+		sessionName: wt.TmuxSession,
+		hasSession:  wt.HasSession,
+		dirty:       wt.Dirty,
+		unpushed:    !wt.PushedRemote,
+	}
+}
+
+func workspaceDeleteTarget(ws scanner.Workspace) deleteTarget {
+	t := deleteTarget{
+		kind:        deleteWorkspaceKind,
+		repoPath:    ws.Path,
+		path:        ws.Path,
+		label:       ws.Name,
+		sessionName: ws.TmuxSession,
+		hasSession:  ws.HasSession,
+		ws:          ws,
+	}
+	for _, wt := range ws.Worktrees {
+		if wt.Dirty {
+			t.dirty = true
+		}
+		if !wt.PushedRemote {
+			t.unpushed = true
+		}
+	}
+	return t
+}
+
+func (m *Model) cancelDelete() {
+	m.confirmingDelete = false
+	m.deleteTargets = nil
+}
+
+// executeDelete carries out every target, killing tmux sessions and pruning
+// state as it goes, then reports which repos need their worktree list
+// refreshed (worktree-kind targets) and which workspace paths no longer
+// exist on disk at all (workspace-kind targets).
+func (m Model) executeDelete(targets []deleteTarget) tea.Cmd {
 	st := m.st
 	return func() tea.Msg {
-		if err := scanner.RemoveWorktree(repoPath, worktreePath); err != nil {
-			return worktreeDeletedMsg{repoPath: repoPath, err: err}
+		var msg bulkDeletedMsg
+		for _, t := range targets {
+			switch t.kind {
+			case deleteWorktreeKind:
+				if err := scanner.RemoveWorktree(t.repoPath, t.path); err != nil {
+					msg.errs = append(msg.errs, err)
+					continue
+				}
+				if t.hasSession {
+					_ = tmux.KillSession(t.sessionName)
+				}
+				st.Remove(t.path)
+				msg.refreshRepoPaths = append(msg.refreshRepoPaths, t.repoPath)
+
+			case deleteWorkspaceKind:
+				if err := scanner.RemoveWorkspace(t.ws); err != nil {
+					msg.errs = append(msg.errs, err)
+					continue
+				}
+				for _, wt := range t.ws.Worktrees {
+					if wt.HasSession {
+						_ = tmux.KillSession(wt.TmuxSession)
+					}
+					st.Remove(wt.Path)
+				}
+				if t.hasSession {
+					_ = tmux.KillSession(t.sessionName)
+				}
+				st.Remove(t.path)
+				msg.removedPaths = append(msg.removedPaths, t.path)
+			}
 		}
-		if hasSession {
-			_ = tmux.KillSession(sessionName)
-		}
-		st.Remove(worktreePath)
 		_ = st.Save()
-		return worktreeDeletedMsg{repoPath: repoPath}
+		return msg
 	}
+}
+
+func joinErrs(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(errs))
+	for i, e := range errs {
+		msgs[i] = e.Error()
+	}
+	return fmt.Errorf("%s", strings.Join(msgs, "; "))
+}
+
+// removeWorkspace drops path from the workspace list entirely, for use after
+// its whole directory has been deleted from disk (as opposed to
+// refreshWorkspace, which rescans a workspace that still exists).
+func (m *Model) removeWorkspace(path string) {
+	for i := range m.all {
+		if m.all[i].Path == path {
+			m.all = append(m.all[:i], m.all[i+1:]...)
+			break
+		}
+	}
+	delete(m.expanded, path)
+	m.refilter()
 }
 
 func (m *Model) startCloneRepo() {
@@ -933,18 +1258,54 @@ func (m *Model) startFetch() tea.Cmd {
 	if item.ws.Type != scanner.TypeGitRepo {
 		return nil
 	}
-	if m.fetchingPath == item.ws.Path {
-		return nil // already fetching
-	}
+	return m.startFetchMany([]string{item.ws.Path})
+}
 
-	m.fetchingPath = item.ws.Path
+// startFetchVisualSelection fetches every repo spanned by visual mode, then
+// returns to normal mode.
+func (m *Model) startFetchVisualSelection() tea.Cmd {
+	paths := m.fetchPathsForVisualSelection()
+	m.mode = modeNormal
+	return m.startFetchMany(paths)
+}
+
+// fetchPathsForVisualSelection returns the deduplicated repo paths among the
+// rows spanned by visual mode (worktree rows resolve to their parent repo).
+func (m Model) fetchPathsForVisualSelection() []string {
+	lo, hi := m.visualSelectionRange()
+	seen := make(map[string]bool)
+	var paths []string
+	for i := lo; i <= hi && i < len(m.filtered); i++ {
+		item := m.filtered[i]
+		if item.ws.Type != scanner.TypeGitRepo || seen[item.ws.Path] {
+			continue
+		}
+		seen[item.ws.Path] = true
+		paths = append(paths, item.ws.Path)
+	}
+	return paths
+}
+
+// startFetchMany runs `git fetch origin` for each of paths concurrently in
+// the background, skipping any already in flight.
+func (m *Model) startFetchMany(paths []string) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, p := range paths {
+		if m.fetchingPaths[p] {
+			continue
+		}
+		m.fetchingPaths[p] = true
+		repoPath := p
+		cmds = append(cmds, func() tea.Msg {
+			return repoFetchedMsg{repoPath: repoPath, err: scanner.Fetch(repoPath)}
+		})
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
 	m.spinnerFrame = 0
-	repoPath := item.ws.Path
-
-	fetch := func() tea.Msg {
-		return repoFetchedMsg{repoPath: repoPath, err: scanner.Fetch(repoPath)}
-	}
-	return tea.Batch(fetch, spinnerTick())
+	cmds = append(cmds, spinnerTick())
+	return tea.Batch(cmds...)
 }
 
 func spinnerTick() tea.Cmd {

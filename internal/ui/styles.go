@@ -55,6 +55,16 @@ var (
 				Foreground(colSubtext).
 				PaddingLeft(3)
 
+	styleVisual = lipgloss.NewStyle().
+			Background(colOverlay).
+			Foreground(colText).
+			PaddingLeft(1)
+
+	styleWorktreeVisual = lipgloss.NewStyle().
+				Background(colOverlay).
+				Foreground(colSubtext).
+				PaddingLeft(3)
+
 	styleDirty = lipgloss.NewStyle().
 			Foreground(colYellow)
 
