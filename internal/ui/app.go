@@ -598,10 +598,11 @@ func (m Model) renderItem(i int) string {
 		if wt.HasSession {
 			dot = styleSessionActive.Render(" " + iconDot)
 		}
+		claude := m.renderClaudeHint(wt.HasSession, wt.ClaudeState)
 		if selected {
-			return styleWorktreeSelected.Render(body) + status + dot
+			return styleWorktreeSelected.Render(body) + status + dot + claude
 		}
-		return styleWorktreeItem.Render(body) + status + dot
+		return styleWorktreeItem.Render(body) + status + dot + claude
 	}
 
 	icon := m.icon(ws.Type == scanner.TypeGitRepo)
@@ -630,15 +631,35 @@ func (m Model) renderItem(i int) string {
 	if ws.Path == m.fetchingPath {
 		dot = styleSpinner.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
 	}
+	claude := m.renderClaudeHint(ws.HasSession, ws.ClaudeState)
 
 	if selected {
-		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot)
+		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot) - lipgloss.Width(claude)
 		if bodyWidth < lipgloss.Width(body) {
 			bodyWidth = lipgloss.Width(body)
 		}
-		return styleSelected.Width(bodyWidth).Render(body) + branch + dot
+		return styleSelected.Width(bodyWidth).Render(body) + branch + dot + claude
 	}
-	return styleNormal.Render(body) + branch + dot
+	return styleNormal.Render(body) + branch + dot + claude
+}
+
+// renderClaudeHint renders a small indicator of a workspace's Claude Code
+// turn state (running / waiting on you / needs attention), or "" if there's
+// no session or no known state.
+func (m Model) renderClaudeHint(hasSession bool, state scanner.ClaudeState) string {
+	if !hasSession {
+		return ""
+	}
+	switch state {
+	case scanner.ClaudeStateRunning:
+		return styleSpinner.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
+	case scanner.ClaudeStateWaiting:
+		return styleClaudeWaiting.Render(" " + iconClaudeWaiting)
+	case scanner.ClaudeStateAttention:
+		return styleClaudeAttention.Render(" " + iconClaudeAttention)
+	default:
+		return ""
+	}
 }
 
 // renderPRList renders the Ctrl+R PR picker in place of the workspace list.
