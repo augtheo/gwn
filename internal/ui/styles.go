@@ -77,6 +77,12 @@ var (
 	styleLastCommit = lipgloss.NewStyle().
 			Foreground(colOverlay)
 
+	styleClaudeWaiting = lipgloss.NewStyle().
+				Foreground(colGreen)
+
+	styleClaudeAttention = lipgloss.NewStyle().
+				Foreground(colRed)
+
 	styleHints = lipgloss.NewStyle().
 			Foreground(colOverlay).
 			PaddingLeft(1)
@@ -99,6 +105,9 @@ const (
 	iconDirty    = "*"
 	iconMerged   = "✓"
 	iconPushed   = "↑"
+
+	iconClaudeWaiting   = "◆"
+	iconClaudeAttention = "!"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
