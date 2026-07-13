@@ -67,6 +67,8 @@ The flake uses `vendorHash = null` because the `vendor/` directory is committed.
 
 **Session naming.** `tmux.SessionName(prefix, path)` uses `filepath.Base(path)` and sanitizes to `[a-zA-Z0-9-]`. For worktrees, `tmux.WorktreeSessionName(prefix, repoName, branch)` concatenates and sanitizes — it does not use `filepath.Base` because branch names can contain `/`.
 
+**Claude Code turn-state hints.** `scanner.ClaudeState` (`Workspace.ClaudeState` / `WorktreeInfo.ClaudeState`) reflects whether the Claude Code session in a workspace's "ai" tmux window is `running`, `waiting` (Claude responded, your turn), or needs `attention` (permission prompt / idle nudge). This is read at scan time from `$XDG_DATA_HOME/gwn/claude-status/<path-with-/-replaced-by-_>.json` (see `readClaudeState` in `scanner/git.go`) — gwn itself never writes these files. They're produced by Claude Code hooks (`UserPromptSubmit`/`Stop`/`Notification`/`SessionEnd`) configured outside this repo, in the `augtheo/dotfiles` `home/programs/claude-code.nix` module (`gwnClaudeStatus` script, branch `claude-status-hint`). Changing the file naming/location or the JSON `state` values needs a matching change on both sides.
+
 ## Adding a new config field
 
 1. Add the field to `Config` in `internal/config/config.go` with a `toml` tag.

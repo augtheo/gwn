@@ -34,6 +34,9 @@ type Workspace struct {
 	// set after reconcile with state
 	TmuxSession string
 	HasSession  bool
+	// ClaudeState is the last known turn state of a Claude Code session
+	// running at Path, reported via hooks. Only meaningful when HasSession.
+	ClaudeState ClaudeState
 }
 
 type WorktreeInfo struct {
@@ -49,6 +52,55 @@ type WorktreeInfo struct {
 	PushedRemote bool
 	// LastCommit is the commit time of HEAD, used as a "last worked on" signal.
 	LastCommit time.Time
+	// ClaudeState is the last known turn state of a Claude Code session
+	// running at Path, reported via hooks. Only meaningful when HasSession.
+	ClaudeState ClaudeState
+}
+
+// ClaudeState is a Claude Code session's last reported turn state, written by
+// hooks (see the "ai" tmux window convention in internal/tmux/session.go)
+// to a per-path status file that gwn reads at scan time.
+type ClaudeState string
+
+const (
+	ClaudeStateNone      ClaudeState = ""
+	ClaudeStateRunning   ClaudeState = "running"
+	ClaudeStateWaiting   ClaudeState = "waiting"
+	ClaudeStateAttention ClaudeState = "attention"
+)
+
+// claudeStatusDir mirrors the XDG data dir resolution in internal/state, and
+// must match the directory the "gwn-claude-status" hook script writes to.
+func claudeStatusDir() string {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, _ := os.UserHomeDir()
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dataHome, "gwn", "claude-status")
+}
+
+// readClaudeState reads the status file a Claude Code hook last wrote for
+// path, if any. Absent, unreadable, or unrecognized files all mean "no
+// known state" rather than an error — the hook simply may never have fired.
+func readClaudeState(path string) ClaudeState {
+	file := filepath.Join(claudeStatusDir(), strings.ReplaceAll(path, "/", "_")+".json")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return ClaudeStateNone
+	}
+	var v struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ClaudeStateNone
+	}
+	switch ClaudeState(v.State) {
+	case ClaudeStateRunning, ClaudeStateWaiting, ClaudeStateAttention:
+		return ClaudeState(v.State)
+	default:
+		return ClaudeStateNone
+	}
 }
 
 // Rescan re-detects a single workspace at path, refreshing its branch and
@@ -387,9 +439,10 @@ func defaultRemoteBranch(url string) (string, error) {
 
 func detectWorkspace(path string) Workspace {
 	ws := Workspace{
-		Path: path,
-		Name: filepath.Base(path),
-		Type: TypePlain,
+		Path:        path,
+		Name:        filepath.Base(path),
+		Type:        TypePlain,
+		ClaudeState: readClaudeState(path),
 	}
 
 	if bareDir, ok := bareGitDir(path); ok {
@@ -465,14 +518,16 @@ func listWorktrees(repoPath string) []WorktreeInfo {
 }
 
 // WorktreeStatus holds the status fields that require a handful of git
-// subprocess calls to compute (dirty, merged, pushed, last commit). Split out
-// from listWorktrees so callers can fetch this lazily, in the background,
-// instead of blocking the initial scan on every worktree in every repo.
+// subprocess calls to compute (dirty, merged, pushed, last commit, Claude
+// turn state). Split out from listWorktrees so callers can fetch this
+// lazily, in the background, instead of blocking the initial scan on every
+// worktree in every repo.
 type WorktreeStatus struct {
 	Dirty        bool
 	MergedLocal  bool
 	PushedRemote bool
 	LastCommit   time.Time
+	ClaudeState  ClaudeState
 }
 
 // AnnotateWorktree computes path's status fields against its own directory —
@@ -484,6 +539,7 @@ func AnnotateWorktree(path, branch string) WorktreeStatus {
 		LastCommit:   lastCommitTime(path),
 		MergedLocal:  isMergedToLocalMain(path),
 		PushedRemote: isPushedToRemote(path, branch),
+		ClaudeState:  readClaudeState(path),
 	}
 }
 

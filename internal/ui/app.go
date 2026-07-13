@@ -741,13 +741,14 @@ func (m Model) renderItem(i int) string {
 		if wt.HasSession {
 			dot = styleSessionActive.Render(" " + iconDot)
 		}
+		claude := m.renderClaudeHint(wt.HasSession, wt.ClaudeState)
 		switch {
 		case selected:
-			return styleWorktreeSelected.Render(body) + status + dot
+			return styleWorktreeSelected.Render(body) + status + dot + claude
 		case inVisual:
-			return styleWorktreeVisual.Render(body) + status + dot
+			return styleWorktreeVisual.Render(body) + status + dot + claude
 		}
-		return styleWorktreeItem.Render(body) + status + dot
+		return styleWorktreeItem.Render(body) + status + dot + claude
 	}
 
 	icon := m.icon(ws.Type == scanner.TypeGitRepo)
@@ -776,22 +777,42 @@ func (m Model) renderItem(i int) string {
 	if m.fetchingPaths[ws.Path] {
 		dot = styleSpinner.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
 	}
+	claude := m.renderClaudeHint(ws.HasSession, ws.ClaudeState)
 
 	switch {
 	case selected:
-		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot)
+		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot) - lipgloss.Width(claude)
 		if bodyWidth < lipgloss.Width(body) {
 			bodyWidth = lipgloss.Width(body)
 		}
-		return styleSelected.Width(bodyWidth).Render(body) + branch + dot
+		return styleSelected.Width(bodyWidth).Render(body) + branch + dot + claude
 	case inVisual:
-		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot)
+		bodyWidth := m.width - 2 - lipgloss.Width(branch) - lipgloss.Width(dot) - lipgloss.Width(claude)
 		if bodyWidth < lipgloss.Width(body) {
 			bodyWidth = lipgloss.Width(body)
 		}
-		return styleVisual.Width(bodyWidth).Render(body) + branch + dot
+		return styleVisual.Width(bodyWidth).Render(body) + branch + dot + claude
 	}
-	return styleNormal.Render(body) + branch + dot
+	return styleNormal.Render(body) + branch + dot + claude
+}
+
+// renderClaudeHint renders a small indicator of a workspace's Claude Code
+// turn state (running / waiting on you / needs attention), or "" if there's
+// no session or no known state.
+func (m Model) renderClaudeHint(hasSession bool, state scanner.ClaudeState) string {
+	if !hasSession {
+		return ""
+	}
+	switch state {
+	case scanner.ClaudeStateRunning:
+		return styleSpinner.Render(" " + spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
+	case scanner.ClaudeStateWaiting:
+		return styleClaudeWaiting.Render(" " + iconClaudeWaiting)
+	case scanner.ClaudeStateAttention:
+		return styleClaudeAttention.Render(" " + iconClaudeAttention)
+	default:
+		return ""
+	}
 }
 
 // renderDeleteConfirm renders the confirmation prompt for m.deleteTargets: a
@@ -1370,6 +1391,7 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			wt.MergedLocal = msg.status.MergedLocal
 			wt.PushedRemote = msg.status.PushedRemote
 			wt.LastCommit = msg.status.LastCommit
+			wt.ClaudeState = msg.status.ClaudeState
 			break
 		}
 		break
