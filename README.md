@@ -23,7 +23,7 @@ A terminal workspace navigator. Scans configured project directories, detects gi
 - Vim-style modal navigation — starts in Normal mode; press `i` or `/` to search
 - Fuzzy search across all projects in configured paths
 - Git worktree detection — expands inline with `Tab`
-- Create new worktrees on the fly with `Ctrl+W`
+- Create new worktrees on the fly with `Ctrl+T`
 - Clone a remote as a new bare repo with `Ctrl+G`, ready for worktrees from the start
 - Fetch a repo from `origin` with `Ctrl+F`, with a spinner on its row while it runs
 - Review a PR with `Ctrl+R` on a bare repo — pick from its open PRs, and gwn fetches it, creates a worktree, and opens a session with an extra `diff` window
@@ -99,7 +99,7 @@ default_git_host  = "github.com" # host assumed for "owner/repo" shorthand with 
 clone_protocol    = "https"      # "https" or "ssh" — used to build the clone URL for shorthand forms
 review_command    = "gh pr diff {pr} | hunk patch" # run in the "diff" window after Ctrl+R checkout; {pr} is the PR number
 
-# Auto-prefix new branch names (Ctrl+W) for repos under a given path.
+# Auto-prefix new branch names (Ctrl+T) for repos under a given path.
 # Matched by longest path prefix; repos outside all of these get no prefix.
 [[branch_prefixes]]
 path   = "~/projects/work"
@@ -150,7 +150,7 @@ before.
 | `Tab` | Expand or collapse worktrees for a git repo |
 | `i` / `a` | Enter Insert mode (cursor moves to end of the current filter) |
 | `/` | Clear the filter and enter Insert mode |
-| `Ctrl+W` | Create a new worktree for the selected repo (prompts for branch name) |
+| `Ctrl+T` | Create a new worktree for the selected repo (prompts for branch name) |
 | `Ctrl+G` | Clone a remote repo as a new bare repo (prompts for owner/repo or a URL) |
 | `Ctrl+F` | Fetch the selected repo from `origin` (shows a spinner on its row while running) |
 | `Ctrl+R` | On a bare repo, open a picker of its open PRs; confirming checks one out and opens its session |
@@ -168,7 +168,7 @@ before.
 
 ## Creating worktrees
 
-Select any git repo (or one of its worktrees) and press `Ctrl+W` to create a new worktree. Type a branch name and hit `Enter`:
+Select any git repo (or one of its worktrees) and press `Ctrl+T` to create a new worktree. Type a branch name and hit `Enter`:
 
 - If the branch already exists locally, it's checked out into the new worktree.
 - Else if it exists on the `origin` remote — already fetched, e.g. a bot-opened branch you just `git fetch`ed — a local branch is created tracking it (`git worktree add --track -b <branch> ... origin/<branch>`), not a fresh branch off `HEAD`.
@@ -185,7 +185,7 @@ Where the new worktree lands depends on the repo's layout:
 
 The repo entry expands automatically to show the new worktree. Press `Esc` to cancel the prompt.
 
-To pick up new branches from the remote (e.g. one a bot just opened), select the repo and press `Ctrl+F` to fetch `origin` — a spinner shows on its row while it runs. There's no *automatic* fetch on `Ctrl+W` itself, since that'd be a silent network call; fetching is always this explicit, separate step. Equivalent by hand:
+To pick up new branches from the remote (e.g. one a bot just opened), select the repo and press `Ctrl+F` to fetch `origin` — a spinner shows on its row while it runs. There's no *automatic* fetch on `Ctrl+T` itself, since that'd be a silent network call; fetching is always this explicit, separate step. Equivalent by hand:
 
 ```bash
 git -C <repo>/.bare fetch origin   # or just `git fetch` inside a plain repo
@@ -214,7 +214,7 @@ This bare + worktree layout is the recommended way to work with a repo in `gwn`:
 `gwn` doesn't help you find which PRs to review — use `gh pr list --search "review-requested:@me"` or the [`gh dash`](https://github.com/dlvhdr/gh-dash) TUI for that. Once you know which repo, select its bare-repo row and press `Ctrl+R`:
 
 1. `gwn` fetches the repo's open PRs via `gh pr list` and shows a picker (number, title, author). Type to fuzzy-filter, `↑`/`↓` to move.
-2. `Enter` on a PR fetches its head ref (`git fetch origin pull/<n>/head:pr-<n>`) and creates a worktree for it — same underlying mechanism as `Ctrl+W`, just skipping the branch-name prompt.
+2. `Enter` on a PR fetches its head ref (`git fetch origin pull/<n>/head:pr-<n>`) and creates a worktree for it — same underlying mechanism as `Ctrl+T`, just skipping the branch-name prompt.
 3. The tmux session opens automatically with a fourth window, `diff`, running `review_command` (default `gh pr diff <n> | hunk patch`), a live [`hunk`](https://github.com/modem-dev/hunk) review session for that diff.
 
 From there:

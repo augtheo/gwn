@@ -257,7 +257,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.toggleExpand()
 			return m, nil
-		case "ctrl+w":
+		case "ctrl+t":
 			m.startCreateWorktree()
 			return m, nil
 		case "ctrl+g":
@@ -406,7 +406,7 @@ func (m Model) updateInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "enter":
 		return m, m.openSelected()
-	case "up", "ctrl+p", "ctrl+k":
+	case "up", "ctrl+p":
 		m.moveCursor(-1)
 		return m, nil
 	case "down", "ctrl+n", "ctrl+j":
@@ -674,12 +674,12 @@ func (m Model) View() string {
 			styleHints.Render(" j/k gg/G ^d/^u: extend  d: delete selected  ^f: fetch selected  esc/V: cancel"))
 	case m.cfg.VimMode && m.mode == modeNormal:
 		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
-			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: expand  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: expand  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
-			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate  ^w/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
+			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
 	default:
-		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+w: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
+		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+t: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
@@ -1271,7 +1271,7 @@ func (m Model) cloneRepo(src string) tea.Cmd {
 }
 
 // startFetch runs `git fetch origin` for the selected repo in the background,
-// so new remote branches (bots, teammates, CI) become available to Ctrl+W.
+// so new remote branches (bots, teammates, CI) become available to Ctrl+T.
 func (m *Model) startFetch() tea.Cmd {
 	if m.cursor >= len(m.filtered) {
 		return nil
@@ -1598,7 +1598,7 @@ func (m Model) updatePickPRInsert(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.confirmPickPR()
-	case "up", "ctrl+p", "ctrl+k":
+	case "up", "ctrl+p":
 		m.movePRCursor(-1)
 		return m, nil
 	case "down", "ctrl+n", "ctrl+j":

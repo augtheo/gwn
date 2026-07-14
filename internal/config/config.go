@@ -24,7 +24,7 @@ type Config struct {
 	Appearance       Appearance         `toml:"appearance"`
 }
 
-// BranchPrefixRule auto-prefixes new branch names (in the Ctrl+W prompt) for
+// BranchPrefixRule auto-prefixes new branch names (in the Ctrl+T prompt) for
 // repos under Path, e.g. so work repos get "augtheo/" but personal ones don't.
 type BranchPrefixRule struct {
 	Path   string `toml:"path"`
