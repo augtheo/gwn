@@ -1592,7 +1592,7 @@ func (m Model) openPath(dir, sessionName, branch string) tea.Cmd {
 	st := m.st
 
 	return func() tea.Msg {
-		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.Assistant, extraName, extraCmd)
+		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.AssistantFor(dir), extraName, extraCmd)
 		if err != nil {
 			return errMsg(err)
 		}

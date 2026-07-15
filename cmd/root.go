@@ -51,7 +51,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if cfg.AutoAttachSingle && len(workspaces) == 1 {
 		ws := workspaces[0]
 		session := tmux.SessionName(cfg.SessionPrefix, ws.Path)
-		return tmux.OpenWorkspace(session, ws.Path, cfg.Editor, cfg.Assistant, "", "")
+		return tmux.OpenWorkspace(session, ws.Path, cfg.Editor, cfg.AssistantFor(ws.Path), "", "")
 	}
 
 	model := ui.New(cfg, st, workspaces)
