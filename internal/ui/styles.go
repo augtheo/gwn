@@ -93,6 +93,17 @@ var (
 			PaddingLeft(1).
 			PaddingBottom(1)
 
+	styleTabActive = lipgloss.NewStyle().
+			Background(colGreen).
+			Foreground(colBase).
+			Bold(true).
+			Padding(0, 1)
+
+	styleTabInactive = lipgloss.NewStyle().
+				Background(colSurface).
+				Foreground(colSubtext).
+				Padding(0, 1)
+
 	styleSeparator = lipgloss.NewStyle().
 			Foreground(colSurface)
 )

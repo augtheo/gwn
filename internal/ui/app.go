@@ -84,6 +84,11 @@ type Model struct {
 	quitting bool
 	expanded map[string]bool // path → expanded
 
+	// activeView, toggled by tab, swaps the list to only the workspaces and
+	// worktrees that currently have a live tmux session attached — the ones
+	// actually being worked on — instead of the full scanned tree.
+	activeView bool
+
 	mode         mode
 	pendingG     bool // "g" seen, waiting for a second "g" (gg = go to top)
 	pendingD     bool // "d" seen, waiting for a second "d" (dd = delete row)
@@ -138,7 +143,7 @@ type deleteTarget struct {
 
 func New(cfg *config.Config, st *state.State, workspaces []scanner.Workspace) Model {
 	ti := textinput.New()
-	ti.Placeholder = "search workspaces..."
+	ti.Placeholder = "search active worktrees..."
 	ti.Focus()
 	ti.CharLimit = 80
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(colBlue)
@@ -152,6 +157,7 @@ func New(cfg *config.Config, st *state.State, workspaces []scanner.Workspace) Mo
 		expanded:      make(map[string]bool),
 		mode:          modeInsert,
 		fetchingPaths: make(map[string]bool),
+		activeView:    true,
 	}
 	if cfg.VimMode {
 		m.mode = modeNormal
@@ -255,7 +261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "tab":
-			m.toggleExpand()
+			m.toggleActiveView()
 			return m, nil
 		case "ctrl+t":
 			m.startCreateWorktree()
@@ -614,7 +620,7 @@ func clampIndex(i, n int) int {
 // selected repo if it's expanded, or jump up to the parent repo if the
 // selection is one of its worktrees.
 func (m *Model) collapseOrJumpToParent() {
-	if m.cursor >= len(m.filtered) {
+	if m.activeView || m.cursor >= len(m.filtered) {
 		return
 	}
 	item := m.filtered[m.cursor]
@@ -636,7 +642,8 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	b.WriteString(styleTitle.Render("gwn") + "\n")
+	b.WriteString(styleTitle.PaddingBottom(0).Render("gwn") + "\n")
+	b.WriteString(" " + m.renderViewTabs() + "\n\n")
 
 	inputWidth := m.width - 6
 	if inputWidth < 20 {
@@ -648,9 +655,12 @@ func (m Model) View() string {
 	}
 	b.WriteString(inputBorder.Width(inputWidth).Render(m.input.View()) + "\n\n")
 
-	if m.pickingPR {
+	switch {
+	case m.pickingPR:
 		b.WriteString(m.renderPRList() + "\n")
-	} else {
+	case m.activeView && len(m.filtered) == 0:
+		b.WriteString(styleHints.Render(" no active worktrees — tab: back to all workspaces") + "\n")
+	default:
 		start, end := m.visibleRange(m.listHeight())
 		for i := start; i < end && i < len(m.filtered); i++ {
 			b.WriteString(m.renderItem(i) + "\n")
@@ -674,15 +684,28 @@ func (m Model) View() string {
 			styleHints.Render(" j/k gg/G ^d/^u: extend  d: delete selected  ^f: fetch selected  esc/V: cancel"))
 	case m.cfg.VimMode && m.mode == modeNormal:
 		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
-			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: expand  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: active view  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
-			styleHints.Render(" esc: normal mode  enter: open  tab: expand  ↑↓: navigate  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
+			styleHints.Render(" esc: normal mode  enter: open  tab: active view  ↑↓: navigate  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
 	default:
-		b.WriteString(styleHints.Render("enter: open  tab: expand worktrees  ctrl+t: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
+		b.WriteString(styleHints.Render("enter: open  tab: active view  ctrl+t: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
+}
+
+// renderViewTabs renders the "active"/"all" tab strip that tab toggles
+// between, highlighting whichever one is currently showing — the same idea
+// as tmux bolding the current window in its status line.
+func (m Model) renderViewTabs() string {
+	active, all := styleTabInactive, styleTabInactive
+	if m.activeView {
+		active = styleTabActive
+	} else {
+		all = styleTabActive
+	}
+	return active.Render("active") + " " + all.Render("all")
 }
 
 // listHeight returns the number of item rows that fit in the terminal,
@@ -716,9 +739,13 @@ func (m Model) renderItem(i int) string {
 
 	if item.wtIdx >= 0 {
 		wt := ws.Worktrees[item.wtIdx]
+		label := wt.Branch
+		if m.activeView {
+			label = ws.Name + " / " + wt.Branch
+		}
 		// Plain text body first, coloured parts appended outside the style render
 		// to avoid ANSI codes inside a Width-constrained Render call.
-		body := "   " + wt.Branch
+		body := "   " + m.worktreeIcon() + label
 		status := ""
 		if wt.Dirty {
 			status += styleDirty.Render(" " + iconDirty)
@@ -749,7 +776,7 @@ func (m Model) renderItem(i int) string {
 	icon := m.icon(ws)
 
 	expandHint := ""
-	if canExpand(ws) {
+	if !m.activeView && canExpand(ws) {
 		if m.expanded[ws.Path] {
 			expandHint = " ▾"
 		} else {
@@ -934,23 +961,36 @@ func (m Model) icon(ws scanner.Workspace) string {
 	return iconGit + " "
 }
 
-func (m *Model) toggleExpand() {
-	if m.cursor >= len(m.filtered) {
-		return
+// worktreeIcon returns the icon prefix for a linked worktree row (a checked
+// out branch nested under a repo), distinct from icon()'s top-level
+// repo/dir/bare-container icon.
+func (m Model) worktreeIcon() string {
+	if !m.cfg.NerdFontIcons {
+		return "wt "
 	}
-	item := m.filtered[m.cursor]
-	if item.wtIdx >= 0 || !canExpand(item.ws) {
-		return
+	return iconWorktree + " "
+}
+
+// toggleActiveView flips between the full workspace tree and the flattened
+// list of workspaces/worktrees that currently have a live tmux session, so a
+// second tab press always returns to the exact view just left.
+func (m *Model) toggleActiveView() {
+	m.activeView = !m.activeView
+	if m.activeView {
+		m.input.Placeholder = "search active worktrees..."
+	} else {
+		m.input.Placeholder = "search workspaces..."
 	}
-	m.expanded[item.ws.Path] = !m.expanded[item.ws.Path]
+	m.cursor = 0
 	m.refilter()
 }
 
 // expandSelected implements vim tree-navigation "l": if the selected row is a
 // collapsed, expandable repo, reveal its worktrees instead of opening it.
-// Returns true if it expanded, so the caller skips the open action.
+// Returns true if it expanded, so the caller skips the open action. The
+// active view is already flat, so it never expands — "l" just opens.
 func (m *Model) expandSelected() bool {
-	if m.cursor >= len(m.filtered) {
+	if m.activeView || m.cursor >= len(m.filtered) {
 		return false
 	}
 	item := m.filtered[m.cursor]
@@ -1411,6 +1451,19 @@ func (m *Model) selectWorkspace(path string) {
 }
 
 func (m *Model) refilter() {
+	if m.activeView {
+		m.filtered = m.buildActiveFiltered()
+	} else {
+		m.filtered = m.buildTreeFiltered()
+	}
+	if m.cursor >= len(m.filtered) && len(m.filtered) > 0 {
+		m.cursor = len(m.filtered) - 1
+	}
+}
+
+// buildTreeFiltered builds the normal, expandable workspace tree, fuzzy
+// filtered by the search box over workspace names.
+func (m *Model) buildTreeFiltered() []listItem {
 	query := m.input.Value()
 	var base []scanner.Workspace
 
@@ -1438,11 +1491,44 @@ func (m *Model) refilter() {
 			}
 		}
 	}
+	return final
+}
 
-	m.filtered = final
-	if m.cursor >= len(m.filtered) && len(m.filtered) > 0 {
-		m.cursor = len(m.filtered) - 1
+// buildActiveFiltered builds the flattened "active view" list: one row per
+// workspace or worktree that currently has a live tmux session, in the same
+// order as m.all (already MRU-sorted at scan time), fuzzy filtered by the
+// search box over "repo" or "repo/branch".
+func (m *Model) buildActiveFiltered() []listItem {
+	var items []listItem
+	var labels []string
+
+	for _, ws := range m.all {
+		if ws.HasSession {
+			items = append(items, listItem{ws: ws, wtIdx: -1, parentIdx: -1})
+			labels = append(labels, ws.Name)
+		}
+		for j, wt := range ws.Worktrees {
+			// A plain (non-bare) repo's main worktree shares ws.Path and was
+			// already covered by the workspace-level row above.
+			if wt.Path == ws.Path || !wt.HasSession {
+				continue
+			}
+			items = append(items, listItem{ws: ws, wtIdx: j, parentIdx: -1})
+			labels = append(labels, ws.Name+"/"+wt.Branch)
+		}
 	}
+
+	query := m.input.Value()
+	if query == "" {
+		return items
+	}
+
+	matches := fuzzy.Find(query, labels)
+	filtered := make([]listItem, 0, len(matches))
+	for _, match := range matches {
+		filtered = append(filtered, items[match.Index])
+	}
+	return filtered
 }
 
 func (m *Model) visibleRange(height int) (int, int) {
