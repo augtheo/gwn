@@ -1,6 +1,6 @@
 # gwn
 
-A terminal workspace navigator. Scans configured project directories, detects git worktrees, and manages tmux sessions — each with a neovim window and an AI assistant window — so switching between workspaces is a single keypress.
+A terminal workspace navigator. Scans configured project directories, detects git worktrees, and manages tmux sessions — each with a lazygit window, a neovim window, an AI assistant window, and a diff window — so switching between workspaces is a single keypress.
 
 ```
   gwn
@@ -12,7 +12,7 @@ A terminal workspace navigator. Scans configured project directories, detects gi
   myapp ▾  main ●
    feat/auth ●
    fix/typo ○
-  example-sdk  main ○
+  cognite-sdk  main ○
   scripts  ○
 
  NORMAL  i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  tab: expand  ^w/^g/^f/^r: worktree/clone/fetch/review  q: quit
@@ -26,11 +26,14 @@ A terminal workspace navigator. Scans configured project directories, detects gi
 - Create new worktrees on the fly with `Ctrl+T`
 - Clone a remote as a new bare repo with `Ctrl+G`, ready for worktrees from the start
 - Fetch a repo from `origin` with `Ctrl+F`, with a spinner on its row while it runs
-- Review a PR with `Ctrl+R` on a bare repo — pick from its open PRs, and gwn fetches it, creates a worktree, and opens a session with an extra `diff` window
+- Review a PR with `Ctrl+R` on a bare repo — pick from its open PRs, and gwn fetches it, creates a worktree, and opens a session whose `diff` window runs `review_command` for that PR
 - MRU ordering — most recently opened workspaces float to the top
-- Tmux session management — creates sessions on demand with two default windows:
+- Tmux session management — creates sessions on demand with these windows:
+  - `lazygit` — `lazygit`
   - `editor` — `nvim .`
-  - `ai` — `claude` (or `opencode`, configurable)
+  - `agent` — `claude` (or `opencode`, configurable)
+  - `diff` — `diff_command` (or `review_command` for PR worktrees)
+  - `shell` — a plain shell
 - Live session indicator — green dot means a tmux session is already running
 - `gwn open <path>` subcommand for scripting and tmux bindings
 
@@ -41,7 +44,8 @@ A terminal workspace navigator. Scans configured project directories, detects gi
 - A Nerd Font (for icons — optional, configurable)
 - `git` in PATH (for worktree listing, and `git clone`/`fetch` if you use `Ctrl+G`/`Ctrl+F`)
 - `gh` (GitHub CLI, authenticated) in PATH if you use `Ctrl+R` to review PRs
-- [`hunk`](https://github.com/modem-dev/hunk) in PATH for the default `review_command`'s diff viewer, which also supports inline review comments (optional — swap `review_command` for `gh pr diff {pr} | less -R` if you'd rather not install it)
+- [`lazygit`](https://github.com/jesseduffield/lazygit) in PATH, run in every session's first window
+- [`hunk`](https://github.com/modem-dev/hunk) in PATH for the default `review_command`/`diff_command` diff viewer, which also supports inline review comments (optional — swap them for e.g. `gh pr diff {pr} | less -R` / `git diff | less -R` if you'd rather not install it)
 
 ## Installation
 
@@ -98,6 +102,7 @@ vim_mode          = true  # start in modal Normal mode; false = classic always-t
 default_git_host  = "github.com" # host assumed for "owner/repo" shorthand with Ctrl+G
 clone_protocol    = "https"      # "https" or "ssh" — used to build the clone URL for shorthand forms
 review_command    = "gh pr diff {pr} | hunk patch" # run in the "diff" window after Ctrl+R checkout; {pr} is the PR number
+diff_command      = "git diff | hunk patch"        # run in the "diff" window otherwise
 
 # Auto-prefix new branch names (Ctrl+T) for repos under a given path.
 # Matched by longest path prefix; repos outside all of these get no prefix.
@@ -203,7 +208,7 @@ Shorthand forms (`owner/repo`, `host/owner/repo`) are built using `clone_protoco
 
 `gwn` clones it as a **bare** repo into `<repo-name>/.bare`, and fixes up the origin fetch refspec (plain `git clone --bare` doesn't wire this up, so `git fetch` wouldn't otherwise update remote-tracking branches). It then detects the remote's default branch and prompts you to create the first worktree, pre-filled with that branch name — hit `Enter` to accept it or type a different one.
 
-The containing `scan_path` is picked by matching the repo's owner against your configured `scan_paths` by directory name (e.g. cloning `acmecorp/example-tool` lands under a `scan_paths` entry named `acmecorp`, case-insensitively) — falling back to the first `scan_path` if none match.
+The containing `scan_path` is picked by matching the repo's owner against your configured `scan_paths` by directory name (e.g. cloning `cognitedata/muninn` lands under a `scan_paths` entry named `cognitedata`, case-insensitively) — falling back to the first `scan_path` if none match.
 
 This bare + worktree layout is the recommended way to work with a repo in `gwn`: because `gwn` only scans one directory level deep and skips dotfiles, worktrees nested inside `<repo>/` (as `<repo>/<branch>`) never show up as duplicate top-level entries the way sibling-directory worktrees can for plain repos.
 
@@ -215,21 +220,23 @@ This bare + worktree layout is the recommended way to work with a repo in `gwn`:
 
 1. `gwn` fetches the repo's open PRs via `gh pr list` and shows a picker (number, title, author). Type to fuzzy-filter, `↑`/`↓` to move.
 2. `Enter` on a PR fetches its head ref (`git fetch origin pull/<n>/head:pr-<n>`) and creates a worktree for it — same underlying mechanism as `Ctrl+T`, just skipping the branch-name prompt.
-3. The tmux session opens automatically with a fourth window, `diff`, running `review_command` (default `gh pr diff <n> | hunk patch`), a live [`hunk`](https://github.com/modem-dev/hunk) review session for that diff.
+3. The tmux session opens automatically with its `diff` window running `review_command` (default `gh pr diff <n> | hunk patch`), a live [`hunk`](https://github.com/modem-dev/hunk) review session for that diff.
 
 From there:
-- Use the `ai` window's assistant to review — e.g. Claude Code's `review` skill.
-- Leave inline comments directly in the `diff` window's `hunk` session as you scroll. Claude Code's bundled `hunk-review` skill can also drive that same live session from the `ai` window (`hunk session review`, `navigate`, `comment add`) to narrate the diff and leave notes for you as you watch — since `gh pr diff | hunk patch` starts a stdin-patch session with no associated repo, session selection auto-resolves (it's the only session for that worktree) or falls back to `hunk session list --json` to find it by `sessionId`/`cwd`.
+- Use the `agent` window's assistant to review — e.g. Claude Code's `review` skill.
+- Leave inline comments directly in the `diff` window's `hunk` session as you scroll. Claude Code's bundled `hunk-review` skill can also drive that same live session from the `agent` window (`hunk session review`, `navigate`, `comment add`) to narrate the diff and leave notes for you as you watch — since `gh pr diff | hunk patch` starts a stdin-patch session with no associated repo, session selection auto-resolves (it's the only session for that worktree) or falls back to `hunk session list --json` to find it by `sessionId`/`cwd`.
 
 ## How sessions work
 
 When you open a workspace:
 
 1. If a tmux session for that workspace already exists → switch to it.
-2. If not → create a new session with two windows (three if opened via `Ctrl+R`):
-   - Window 0 `editor`: runs `nvim .` in the workspace directory
-   - Window 1 `ai`: runs `claude` (or your configured assistant)
-   - Window 2 `diff` (PR worktrees only): runs `review_command` for that PR
+2. If not → create a new session with five windows:
+   - Window 0 `lazygit`: runs `lazygit` in the workspace directory
+   - Window 1 `editor`: runs `nvim .`
+   - Window 2 `agent`: runs `claude` (or your configured assistant)
+   - Window 3 `diff`: runs `review_command` for PR worktrees (opened via `Ctrl+R`), else `diff_command`
+   - Window 4 `shell`: a plain shell
 
 Session names are derived from the directory name (or `reponame-branchname` for worktrees), with non-alphanumeric characters replaced by `-`.
 

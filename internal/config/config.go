@@ -20,6 +20,7 @@ type Config struct {
 	DefaultGitHost   string             `toml:"default_git_host"`
 	CloneProtocol    string             `toml:"clone_protocol"`
 	ReviewCommand    string             `toml:"review_command"`
+	DiffCommand      string             `toml:"diff_command"`
 	BranchPrefixes   []BranchPrefixRule `toml:"branch_prefixes"`
 	AssistantRules   []AssistantRule    `toml:"assistant_rules"`
 	Appearance       Appearance         `toml:"appearance"`
@@ -148,6 +149,7 @@ func defaults() *Config {
 		DefaultGitHost:   "github.com",
 		CloneProtocol:    "https",
 		ReviewCommand:    "gh pr diff {pr} | hunk patch",
+		DiffCommand:      "git diff | hunk patch",
 		Appearance:       Appearance{Theme: "mocha"},
 	}
 }

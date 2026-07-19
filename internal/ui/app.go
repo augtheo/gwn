@@ -1666,17 +1666,20 @@ func (m Model) openSelected() tea.Cmd {
 	return m.openPath(dir, sessionName, branch)
 }
 
-// openPath prepares and opens a tmux session for dir/sessionName. If branch
-// matches the "pr-<n>" convention FetchPR creates, an extra "diff" window is
-// added running cfg.ReviewCommand for that PR number.
+// openPath prepares and opens a tmux session for dir/sessionName. The "diff"
+// window runs cfg.ReviewCommand (substituted for that PR number) if branch
+// matches the "pr-<n>" convention FetchPR creates, else cfg.DiffCommand.
 func (m Model) openPath(dir, sessionName, branch string) tea.Cmd {
-	extraName, extraCmd := scanner.ReviewWindow(branch, m.cfg.ReviewCommand)
+	diffCmd := scanner.ReviewWindow(branch, m.cfg.ReviewCommand)
+	if diffCmd == "" {
+		diffCmd = m.cfg.DiffCommand
+	}
 
 	cfg := m.cfg
 	st := m.st
 
 	return func() tea.Msg {
-		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.AssistantFor(dir), extraName, extraCmd)
+		attachCmd, err := tmux.PrepareOpen(sessionName, dir, cfg.Editor, cfg.AssistantFor(dir), diffCmd)
 		if err != nil {
 			return errMsg(err)
 		}

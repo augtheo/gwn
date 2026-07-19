@@ -63,7 +63,7 @@ type WorktreeInfo struct {
 }
 
 // ClaudeState is a Claude Code session's last reported turn state, written by
-// hooks (see the "ai" tmux window convention in internal/tmux/session.go)
+// hooks (see the "agent" tmux window convention in internal/tmux/session.go)
 // to a per-path status file that gwn reads at scan time.
 type ClaudeState string
 
@@ -357,17 +357,16 @@ func FetchPR(repoPath string, n int) (branch string, err error) {
 
 var PRBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
 
-// ReviewWindow reports the extra tmux window a PR worktree's branch should
-// get: name "diff" running reviewCmd with "{pr}" substituted for the PR
-// number, derived from the "pr-<n>" naming convention FetchPR creates. Both
-// return values are "" for a non-PR branch, meaning "no extra window" — the
-// same convention tmux.PrepareOpen already uses.
-func ReviewWindow(branch, reviewCmd string) (name, cmd string) {
+// ReviewWindow reports the command the "diff" window should run for branch:
+// reviewCmd with "{pr}" substituted for the PR number, derived from the
+// "pr-<n>" naming convention FetchPR creates. Returns "" for a non-PR
+// branch, meaning the caller should fall back to its default diff command.
+func ReviewWindow(branch, reviewCmd string) (cmd string) {
 	match := PRBranchPattern.FindStringSubmatch(branch)
 	if match == nil {
-		return "", ""
+		return ""
 	}
-	return "diff", strings.ReplaceAll(reviewCmd, "{pr}", match[1])
+	return strings.ReplaceAll(reviewCmd, "{pr}", match[1])
 }
 
 func cleanGitOutput(out []byte, err error) string {

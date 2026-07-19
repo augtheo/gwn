@@ -55,9 +55,12 @@ func runReview(cmd *cobra.Command, args []string) error {
 
 	repoName := filepath.Base(abs)
 	sessionName := tmux.WorktreeSessionName(cfg.SessionPrefix, repoName, branch)
-	extraName, extraCmd := scanner.ReviewWindow(branch, cfg.ReviewCommand)
+	diffCmd := scanner.ReviewWindow(branch, cfg.ReviewCommand)
+	if diffCmd == "" {
+		diffCmd = cfg.DiffCommand
+	}
 
-	if err := tmux.OpenWorkspace(sessionName, worktreePath, cfg.Editor, cfg.Assistant, extraName, extraCmd); err != nil {
+	if err := tmux.OpenWorkspace(sessionName, worktreePath, cfg.Editor, cfg.Assistant, diffCmd); err != nil {
 		return err
 	}
 
