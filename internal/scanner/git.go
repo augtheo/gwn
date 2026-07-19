@@ -50,6 +50,11 @@ type WorktreeInfo struct {
 	MergedLocal bool
 	// PushedRemote is true if HEAD has reached origin/<branch>.
 	PushedRemote bool
+	// RemoteMissing is true when refs/remotes/origin/<branch> no longer
+	// exists locally — the branch was deleted on the remote (e.g. after a
+	// PR was merged and the remote branch was cleaned up). Always false
+	// for pr-<n> branches (they never had a remote tracking ref).
+	RemoteMissing bool
 	// LastCommit is the commit time of HEAD, used as a "last worked on" signal.
 	LastCommit time.Time
 	// ClaudeState is the last known turn state of a Claude Code session
@@ -251,7 +256,7 @@ func Fetch(repoPath string) error {
 		gitDir = dir
 	}
 
-	out, err := exec.Command("git", "-C", gitDir, "fetch", "origin").CombinedOutput()
+	out, err := exec.Command("git", "-C", gitDir, "fetch", "--prune", "origin").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git fetch: %s", cleanGitOutput(out, err))
 	}
@@ -350,7 +355,7 @@ func FetchPR(repoPath string, n int) (branch string, err error) {
 	return branch, nil
 }
 
-var prBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
+var PRBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
 
 // ReviewWindow reports the extra tmux window a PR worktree's branch should
 // get: name "diff" running reviewCmd with "{pr}" substituted for the PR
@@ -358,7 +363,7 @@ var prBranchPattern = regexp.MustCompile(`^pr-(\d+)$`)
 // return values are "" for a non-PR branch, meaning "no extra window" — the
 // same convention tmux.PrepareOpen already uses.
 func ReviewWindow(branch, reviewCmd string) (name, cmd string) {
-	match := prBranchPattern.FindStringSubmatch(branch)
+	match := PRBranchPattern.FindStringSubmatch(branch)
 	if match == nil {
 		return "", ""
 	}
@@ -574,11 +579,12 @@ func listWorktrees(repoPath string) []WorktreeInfo {
 // lazily, in the background, instead of blocking the initial scan on every
 // worktree in every repo.
 type WorktreeStatus struct {
-	Dirty        bool
-	MergedLocal  bool
-	PushedRemote bool
-	LastCommit   time.Time
-	ClaudeState  ClaudeState
+	Dirty         bool
+	MergedLocal   bool
+	PushedRemote  bool
+	RemoteMissing bool
+	LastCommit    time.Time
+	ClaudeState   ClaudeState
 }
 
 // AnnotateWorktree computes path's status fields against its own directory —
@@ -589,8 +595,9 @@ func AnnotateWorktree(path, branch string) WorktreeStatus {
 		Dirty:        hasUncommittedChanges(path),
 		LastCommit:   lastCommitTime(path),
 		MergedLocal:  isMergedToLocalMain(path),
-		PushedRemote: isPushedToRemote(path, branch),
-		ClaudeState:  readClaudeState(path),
+		PushedRemote:  isPushedToRemote(path, branch),
+		RemoteMissing: remoteBranchMissing(path, branch),
+		ClaudeState:   readClaudeState(path),
 	}
 }
 
@@ -642,4 +649,55 @@ func isPushedToRemote(path, branch string) bool {
 		return false
 	}
 	return exec.Command("git", "-C", path, "merge-base", "--is-ancestor", "HEAD", remoteRef).Run() == nil
+}
+
+// remoteBranchMissing reports whether refs/remotes/origin/<branch> is
+// absent from the local ref database while the branch was at some point
+// pushed to a remote (has a configured upstream). If the remote ref is
+// gone, the branch was deleted on the remote — typically because its PR
+// was merged and the remote cleanup policy deleted the branch. Branches
+// that were never pushed (no upstream remote) are never flagged, avoiding
+// false positives for purely local branches. pr-<n> branches are also
+// skipped since they are handled separately via the gh CLI.
+func remoteBranchMissing(path, branch string) bool {
+	if branch == "" || PRBranchPattern.MatchString(branch) {
+		return false
+	}
+	if !hasUpstreamRemote(path, branch) {
+		return false
+	}
+	return !refExists(path, "refs/remotes/origin/"+branch)
+}
+
+// hasUpstreamRemote reports whether branch has a configured remote
+// upstream (i.e. it was at some point pushed with -u or --set-upstream).
+// git -C <path> config branch.<name>.remote succeeds and is non-empty.
+func hasUpstreamRemote(path, branch string) bool {
+	out, err := exec.Command("git", "-C", path, "config", "branch."+branch+".remote").Output()
+	return err == nil && len(bytes.TrimSpace(out)) > 0
+}
+
+// PRMerged checks whether GitHub PR number n (in repoPath's origin remote)
+// has been merged, by calling gh pr view. This is an explicit network call
+// (like ListOpenPRs) — only invoked when the user triggers Ctrl+P.
+func PRMerged(repoPath string, n int) bool {
+	gitDir := repoPath
+	if dir, ok := bareGitDir(repoPath); ok {
+		gitDir = dir
+	}
+	slug, err := remoteSlug(gitDir)
+	if err != nil {
+		return false
+	}
+	out, err := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", n), "--repo", slug, "--json", "state").Output()
+	if err != nil {
+		return false
+	}
+	var r struct {
+		State string `json:"state"`
+	}
+	if json.Unmarshal(out, &r) != nil {
+		return false
+	}
+	return r.State == "MERGED"
 }

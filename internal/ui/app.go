@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,14 @@ type bulkDeletedMsg struct {
 	refreshRepoPaths []string
 	removedPaths     []string
 }
+
+// pruneReadyMsg carries the deleteTargets that Ctrl+P collected from merged
+// worktrees, remote-missing worktrees, and gh-confirmed PR branches.
+type pruneReadyMsg struct {
+	token   int
+	targets []deleteTarget
+}
+
 type prListMsg struct {
 	repoPath string
 	prs      []scanner.PRInfo
@@ -110,8 +119,9 @@ type Model struct {
 	prRepoPath string
 	prAll      []scanner.PRInfo
 	prFiltered []scanner.PRInfo
-	prCursor   int
-	prLoading  bool
+	prCursor    int
+	prLoading   bool
+	pruningPRs  int
 }
 
 type listItem struct {
@@ -279,6 +289,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+r":
 			return m, m.startPickPR()
+		case "ctrl+p":
+			if m.mode == modeVisual {
+				return m, nil
+			}
+			return m, m.startPruneMerged()
 		}
 
 		if m.cfg.VimMode && m.mode == modeVisual {
@@ -359,6 +374,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		cmd := m.refreshWorkspace(msg.repoPath)
 		return m, tea.Batch(cmd, m.openPath(msg.worktreePath, msg.sessionName, msg.branch))
+
+	case pruneReadyMsg:
+		if msg.token != m.pruningPRs {
+			return m, nil
+		}
+		m.pruningPRs = 0
+		if len(msg.targets) == 0 {
+			return m, nil
+		}
+		m.confirmingDelete = true
+		m.deleteTargets = msg.targets
+		return m, nil
 
 	case worktreeStatusMsg:
 		m.applyWorktreeStatus(msg)
@@ -684,12 +711,12 @@ func (m Model) View() string {
 			styleHints.Render(" j/k gg/G ^d/^u: extend  d: delete selected  ^f: fetch selected  esc/V: cancel"))
 	case m.cfg.VimMode && m.mode == modeNormal:
 		b.WriteString(lipgloss.NewStyle().Foreground(colBlue).Bold(true).Render(" NORMAL ") +
-			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: active view  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review  q: quit"))
+			styleHints.Render(" i//: search  j/k gg/G ^d/^u: move  enter/l: open  h: collapse  V: visual  dd: delete  tab: active view  ^t/^g/^f/^x/^r/^p: worktree/clone/fetch/delete/review/prune  q: quit"))
 	case m.cfg.VimMode:
 		b.WriteString(lipgloss.NewStyle().Foreground(colGreen).Bold(true).Render(" INSERT ") +
-			styleHints.Render(" esc: normal mode  enter: open  tab: active view  ↑↓: navigate  ^t/^g/^f/^x/^r: worktree/clone/fetch/delete/review"))
+			styleHints.Render(" esc: normal mode  enter: open  tab: active view  ↑↓: navigate  ^t/^g/^f/^x/^r/^p: worktree/clone/fetch/delete/review/prune"))
 	default:
-		b.WriteString(styleHints.Render("enter: open  tab: active view  ctrl+t: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ↑↓: navigate  esc/ctrl+c: quit"))
+		b.WriteString(styleHints.Render("enter: open  tab: active view  ctrl+t: new worktree  ctrl+g: clone repo  ctrl+f: fetch  ctrl+x: delete worktree  ctrl+r: review PRs  ctrl+p: prune merged  ↑↓: navigate  esc/ctrl+c: quit"))
 	}
 
 	return b.String()
@@ -1376,6 +1403,62 @@ func spinnerTick() tea.Cmd {
 	})
 }
 
+// startPruneMerged implements Ctrl+P: it collects every worktree that can
+// be safely cleaned up — those whose HEAD is merged to local main/master
+// (MergedLocal), those whose remote-tracking ref has disappeared after a
+// prune (RemoteMissing), and PR-created worktrees (pr-<n>) whose GitHub
+// PR is in "MERGED" state (checked via gh pr view). The combined list is
+// shown in the existing delete confirmation dialog, reusing all of its
+// infrastructure (dirty/unpushed warnings, tmux session kill, state removal).
+func (m *Model) startPruneMerged() tea.Cmd {
+	type prTarget struct {
+		ws   scanner.Workspace
+		idx  int
+		prN  int
+	}
+
+	var immediate []deleteTarget
+	var prs []prTarget
+
+	for _, ws := range m.all {
+		for j, wt := range ws.Worktrees {
+			if wt.MergedLocal || wt.RemoteMissing {
+				immediate = append(immediate, worktreeDeleteTarget(ws, j))
+			}
+			if m := scanner.PRBranchPattern.FindStringSubmatch(wt.Branch); m != nil && !wt.MergedLocal && !wt.RemoteMissing {
+				n, err := strconv.Atoi(m[1])
+				if err != nil {
+					continue
+				}
+				prs = append(prs, prTarget{ws: ws, idx: j, prN: n})
+			}
+		}
+	}
+
+	if len(prs) == 0 {
+		if len(immediate) == 0 {
+			return nil
+		}
+		m.confirmingDelete = true
+		m.deleteTargets = immediate
+		return nil
+	}
+
+	m.pruningPRs++
+	token := m.pruningPRs
+
+	return func() tea.Msg {
+		var all []deleteTarget
+		all = append(all, immediate...)
+		for _, pr := range prs {
+			if scanner.PRMerged(pr.ws.Path, pr.prN) {
+				all = append(all, worktreeDeleteTarget(pr.ws, pr.idx))
+			}
+		}
+		return pruneReadyMsg{token: token, targets: all}
+	}
+}
+
 // refreshWorkspace re-detects the workspace at path (branch + worktree list)
 // after an external change, preserving known tmux session state, then
 // expands it so the change is immediately visible. If path isn't already
@@ -1431,6 +1514,7 @@ func (m *Model) applyWorktreeStatus(msg worktreeStatusMsg) {
 			wt.Dirty = msg.status.Dirty
 			wt.MergedLocal = msg.status.MergedLocal
 			wt.PushedRemote = msg.status.PushedRemote
+			wt.RemoteMissing = msg.status.RemoteMissing
 			wt.LastCommit = msg.status.LastCommit
 			wt.ClaudeState = msg.status.ClaudeState
 			break
